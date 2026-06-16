@@ -1,0 +1,9 @@
+MetaTrader5
+pandas
+pandas-ta
+numpy
+python-dotenv
+colorama
+flask
+anthropic>=0.40.0
+feedparser>=6.0.0

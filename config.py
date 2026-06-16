@@ -1,0 +1,187 @@
+"""
+config.py - Centralised configuration for the Rider Infinity Trading Platform.
+
+Loads settings from a `.env` file (via python-dotenv) and exposes them as
+typed attributes on a `Config` instance.  Provides look-up tables for
+MetaTrader 5 timeframe constants, symbol groups, and human-readable
+timeframe options used throughout the bot.
+"""
+
+import os
+import sys
+from pathlib import Path
+from dotenv import load_dotenv
+
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    mt5 = None  # Allow module to load for tests even without MT5 installed
+
+
+# ── Load .env ────────────────────────────────────────────────────────────
+# Walk up from this file's directory to locate the .env alongside it.
+_ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=_ENV_PATH)
+
+
+# ── Timeframe mapping ────────────────────────────────────────────────────
+# Maps human-readable timeframe strings to MT5 integer constants.
+# If the MetaTrader5 package is not installed we fall back to the raw
+# integer values so the rest of the code-base can still be imported.
+TIMEFRAME_MAP: dict[str, int] = {
+    "M1":  getattr(mt5, "TIMEFRAME_M1",  1),
+    "M5":  getattr(mt5, "TIMEFRAME_M5",  5),
+    "M15": getattr(mt5, "TIMEFRAME_M15", 15),
+    "M30": getattr(mt5, "TIMEFRAME_M30", 30),
+    "H1":  getattr(mt5, "TIMEFRAME_H1",  16385),
+    "H4":  getattr(mt5, "TIMEFRAME_H4",  16388),
+    "D1":  getattr(mt5, "TIMEFRAME_D1",  16408),
+    "W1":  getattr(mt5, "TIMEFRAME_W1",  32769),
+}
+
+# Human-readable options for menus / prompts.
+TIMEFRAME_OPTIONS: list[tuple[str, str]] = [
+    ("M1",  "1 Minute"),
+    ("M5",  "5 Minutes"),
+    ("M15", "15 Minutes"),
+    ("M30", "30 Minutes"),
+    ("H1",  "1 Hour"),
+    ("H4",  "4 Hours"),
+    ("D1",  "1 Day"),
+    ("W1",  "1 Week"),
+]
+
+
+# ── Symbol groups ────────────────────────────────────────────────────────
+SYMBOL_GROUPS: dict[str, list[str]] = {
+    "Majors":  ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"],
+    "Crosses": ["EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "EURAUD", "GBPAUD"],
+    "Metals":  ["XAUUSD", "XAGUSD"],
+    "Exotics": ["USDTRY", "USDZAR", "USDMXN"],
+}
+
+
+# ── Config class ─────────────────────────────────────────────────────────
+class Config:
+    """Strongly-typed access to every setting the bot needs.
+
+    Reads from environment variables (populated by `.env`) and applies
+    sensible defaults where appropriate.  Raises ``SystemExit`` if
+    mandatory MT5 credentials are missing so the bot fails fast.
+    """
+
+    def __init__(self) -> None:
+        # --- MT5 connection (mandatory) ----------------------------------
+        self.mt5_login: int = self._require_int("MT5_LOGIN")
+        self.mt5_password: str = self._require("MT5_PASSWORD")
+        self.mt5_server: str = self._require("MT5_SERVER")
+        self.mt5_path: str = os.getenv(
+            "MT5_PATH",
+            r"C:\Program Files\MetaTrader 5\terminal64.exe",
+        )
+
+        # --- Trading defaults --------------------------------------------
+        self.default_symbol: str = os.getenv("DEFAULT_SYMBOL", "EURUSD")
+        self.default_timeframe: str = os.getenv("DEFAULT_TIMEFRAME", "M5")
+        self.default_lot_size: float = float(os.getenv("DEFAULT_LOT_SIZE", "0.01"))
+
+        # --- Strategy defaults -------------------------------------------
+        self.ema_fast: int = int(os.getenv("EMA_FAST", "9"))
+        self.ema_slow: int = int(os.getenv("EMA_SLOW", "21"))
+        self.rsi_period: int = int(os.getenv("RSI_PERIOD", "14"))
+        self.rsi_overbought: int = int(os.getenv("RSI_OVERBOUGHT", "70"))
+        self.rsi_oversold: int = int(os.getenv("RSI_OVERSOLD", "30"))
+        self.bb_period: int = int(os.getenv("BB_PERIOD", "20"))
+        self.bb_std_dev: float = float(os.getenv("BB_STD_DEV", "2.0"))
+        self.macd_fast: int = int(os.getenv("MACD_FAST", "12"))
+        self.macd_slow: int = int(os.getenv("MACD_SLOW", "26"))
+        self.macd_signal: int = int(os.getenv("MACD_SIGNAL", "9"))
+
+        # --- Risk management ---------------------------------------------
+        self.max_risk_per_trade: float = float(os.getenv("MAX_RISK_PER_TRADE", "1.0"))
+        self.max_daily_drawdown: float = float(os.getenv("MAX_DAILY_DRAWDOWN", "3.0"))
+        self.max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
+        self.max_spread_points: int = int(os.getenv("MAX_SPREAD_POINTS", "30"))
+        self.default_sl_pips: int = int(os.getenv("DEFAULT_SL_PIPS", "50"))
+        self.default_tp_pips: int = int(os.getenv("DEFAULT_TP_PIPS", "100"))
+
+        # --- Bot settings ------------------------------------------------
+        self.magic_number: int = int(os.getenv("MAGIC_NUMBER", "123456"))
+        self.dry_run: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
+
+        # --- News Intelligence -------------------------------------------
+        self.claude_api_key: str = os.getenv("CLAUDE_API_KEY", "")
+        self.news_api_key: str = os.getenv("NEWS_API_KEY", "")
+        self.finnhub_api_key: str = os.getenv("FINNHUB_API_KEY", "")
+        self.news_analysis_enabled: bool = (
+            os.getenv("NEWS_ANALYSIS_ENABLED", "true").lower() in ("true", "1", "yes")
+        )
+        self.news_polling_interval: int = int(os.getenv("NEWS_POLLING_INTERVAL", "60"))
+        self.news_signal_weight: float = float(os.getenv("NEWS_SIGNAL_WEIGHT", "0.25"))
+        self.news_lookback_hours: int = int(os.getenv("NEWS_LOOKBACK_HOURS", "4"))
+        self.news_min_confidence: float = float(os.getenv("NEWS_MIN_CONFIDENCE", "0.6"))
+        self.news_min_impact: float = float(os.getenv("NEWS_MIN_IMPACT", "0.5"))
+        self.news_signal_threshold: float = float(os.getenv("NEWS_SIGNAL_THRESHOLD", "0.3"))
+        self.news_cache_retention_days: int = int(os.getenv("NEWS_CACHE_RETENTION_DAYS", "30"))
+        self.news_mode: str = os.getenv("NEWS_MODE", "combined")  # "combined" | "standalone" | "both"
+        self.news_rss_feeds: list[str] = [
+            feed.strip()
+            for feed in os.getenv("NEWS_RSS_FEEDS", "").split(",")
+            if feed.strip()
+        ] or []  # Empty = use defaults
+
+    # -- Convenience helpers -----------------------------------------------
+
+    def get_mt5_timeframe(self, label: str | None = None) -> int:
+        """Return the MT5 integer constant for a timeframe label.
+
+        Args:
+            label: One of the keys in ``TIMEFRAME_MAP`` (e.g. ``"M5"``).
+                   Defaults to ``self.default_timeframe`` when *None*.
+
+        Returns:
+            MT5 timeframe constant (integer).
+
+        Raises:
+            ValueError: If the label is not recognised.
+        """
+        label = (label or self.default_timeframe).upper()
+        if label not in TIMEFRAME_MAP:
+            raise ValueError(
+                f"Unknown timeframe '{label}'. "
+                f"Valid options: {', '.join(TIMEFRAME_MAP)}"
+            )
+        return TIMEFRAME_MAP[label]
+
+    # -- Internal helpers --------------------------------------------------
+
+    @staticmethod
+    def _require(var: str) -> str:
+        """Return an env-var's value or exit with an error message."""
+        value = os.getenv(var)
+        if not value or value.startswith("your_"):
+            print(
+                f"[CONFIG ERROR] '{var}' is missing or still set to a "
+                f"placeholder.  Please update your .env file."
+            )
+            sys.exit(1)
+        return value
+
+    @staticmethod
+    def _require_int(var: str) -> int:
+        """Like ``_require`` but also casts to ``int``."""
+        raw = Config._require(var)
+        try:
+            return int(raw)
+        except ValueError:
+            print(f"[CONFIG ERROR] '{var}' must be an integer, got '{raw}'.")
+            sys.exit(1)
+
+    # -- Representation ----------------------------------------------------
+
+    def __repr__(self) -> str:
+        return (
+            f"<Config login={self.mt5_login} server={self.mt5_server} "
+            f"symbol={self.default_symbol} tf={self.default_timeframe} "
+            f"dry_run={self.dry_run}>"
+        )

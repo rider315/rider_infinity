@@ -1,0 +1,62 @@
+# ═══════════════════════════════════════════════════════════════
+#  Rider Infinity — .gitignore
+# ═══════════════════════════════════════════════════════════════
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# ── Virtual Environments ─────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# ── Environment & Secrets ────────────────────────────────────
+.env
+!.env.example
+
+# ── Runtime Data (DB, logs, state) ───────────────────────────
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.json
+logs/
+*.log
+
+# ── IDE / Editor ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ── OS Files ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.stackdump
+
+# ── Testing / Scratch ────────────────────────────────────────
+testing_stuff/
+scratch/
+*.tmp
+*.bak
+
+# ── Misc ─────────────────────────────────────────────────────
+*.pyc
+node_modules/
+.cache/
