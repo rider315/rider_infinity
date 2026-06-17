@@ -60,3 +60,6 @@ scratch/
 *.pyc
 node_modules/
 .cache/
+
+# MT5 stub (only used on Linux EC2)
+MetaTrader5.py
