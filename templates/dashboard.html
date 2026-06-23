@@ -1625,6 +1625,51 @@ table.journal-table td {
         </div>
       </div>
     </div>
+
+    <!-- 📊 Performance Export -->
+    <div class="card anim-fade-in anim-delay-5">
+      <div class="card-header">
+        <div class="card-title"><span class="icon">📊</span> Performance Export</div>
+      </div>
+      <div class="card-body">
+        <div style="font-size:.72rem;color:var(--text-muted);margin-bottom:.75rem;">
+          Download live-trade outcomes (entry/exit, P/L, exit reason) and a
+          metrics summary over a time range, then hand them over for optimisation.
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.6rem;">
+          <div>
+            <label style="font-size:.7rem;color:var(--text-dim);display:block;margin-bottom:.2rem;">From</label>
+            <input type="date" id="perfStart" class="form-control" style="font-size:.8rem;padding:.35rem .5rem;">
+          </div>
+          <div>
+            <label style="font-size:.7rem;color:var(--text-dim);display:block;margin-bottom:.2rem;">To</label>
+            <input type="date" id="perfEnd" class="form-control" style="font-size:.8rem;padding:.35rem .5rem;">
+          </div>
+          <div>
+            <label style="font-size:.7rem;color:var(--text-dim);display:block;margin-bottom:.2rem;">Bot ID (blank = all)</label>
+            <input type="number" id="perfBotId" min="1" placeholder="all" class="form-control" style="font-size:.8rem;padding:.35rem .5rem;">
+          </div>
+          <div>
+            <label style="font-size:.7rem;color:var(--text-dim);display:block;margin-bottom:.2rem;">Time slab</label>
+            <select id="perfSlab" class="form-control" style="font-size:.8rem;padding:.35rem .5rem;">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
+          <button class="btn" onclick="APP.perfPreview()" style="flex:1;font-size:.78rem;">Preview Metrics</button>
+          <button class="btn" onclick="APP.perfDownloadCsv()" style="flex:1;font-size:.78rem;">⬇ Trades CSV</button>
+          <button class="btn" onclick="APP.perfDownloadJson()" style="flex:1;font-size:.78rem;">⬇ Summary JSON</button>
+        </div>
+        <div style="margin-top:.5rem;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;">
+          <button class="btn" onclick="APP.perfBackfill()" style="font-size:.78rem;">⟳ Import past trades from MT5</button>
+          <span style="font-size:.68rem;color:var(--text-dim);">last <input type="number" id="perfBackfillDays" value="90" min="1" style="width:3.5rem;font-size:.72rem;padding:.15rem .3rem;"> days (live trades only)</span>
+        </div>
+        <div id="perfPreview" style="margin-top:.75rem;font-size:.72rem;"></div>
+      </div>
+    </div>
   </div><!-- /left-col -->
 
   <!-- â”€─ RIGHT COLUMN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€─ -->
@@ -3157,6 +3202,72 @@ table.journal-table td {
       dom.btnToggleHistory.textContent = state.historyVisible ? 'Hide History' : 'Show History';
       dom.btnToggleHistory.classList.toggle('active', state.historyVisible);
       if (state.historyVisible) fetchBotHistory();
+    },
+
+    _perfQuery() {
+      const p = new URLSearchParams();
+      const start = document.getElementById('perfStart').value;
+      const end   = document.getElementById('perfEnd').value;
+      const botId = document.getElementById('perfBotId').value;
+      const slab  = document.getElementById('perfSlab').value;
+      if (start) p.set('start', start);
+      if (end)   p.set('end', end);
+      if (botId) p.set('bot_id', botId);
+      if (slab)  p.set('slab', slab);
+      return p.toString();
+    },
+
+    async perfPreview() {
+      const box = document.getElementById('perfPreview');
+      box.innerHTML = '<span style="color:var(--text-dim);">Loading…</span>';
+      try {
+        const s = await api('/api/performance/summary?' + this._perfQuery());
+        const o = s.overall || {};
+        if (!o.trades) {
+          box.innerHTML = `<span style="color:var(--text-dim);">No closed trades in range (${s.open_trades||0} still open).</span>`;
+          return;
+        }
+        const pf = o.profit_factor == null ? '∞' : o.profit_factor;
+        const col = o.net_profit >= 0 ? 'var(--accent-green,#3fb950)' : 'var(--accent-red,#f85149)';
+        box.innerHTML = `
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:.3rem .75rem;">
+            <div>Trades: <b>${o.trades}</b> (${s.open_trades||0} open)</div>
+            <div>Win rate: <b>${o.win_rate}%</b></div>
+            <div>Net P/L: <b style="color:${col}">${fmt(o.net_profit)}</b></div>
+            <div>Profit factor: <b>${pf}</b></div>
+            <div>Avg win: <b>${fmt(o.avg_win)}</b></div>
+            <div>Avg loss: <b>${fmt(o.avg_loss)}</b></div>
+            <div>Max drawdown: <b>${fmt(o.max_drawdown)}</b></div>
+            <div>Total pips: <b>${o.total_pips}</b></div>
+          </div>`;
+      } catch (err) {
+        box.innerHTML = `<span style="color:var(--accent-red,#f85149);">${err.message}</span>`;
+      }
+    },
+
+    perfDownloadCsv() {
+      window.location = '/api/performance/trades.csv?' + this._perfQuery();
+      toast('Downloading trades CSV…', 'success');
+    },
+
+    perfDownloadJson() {
+      const q = this._perfQuery();
+      window.location = '/api/performance/summary?download=1' + (q ? '&' + q : '');
+      toast('Downloading summary JSON…', 'success');
+    },
+
+    async perfBackfill() {
+      const days = document.getElementById('perfBackfillDays').value || 90;
+      const box = document.getElementById('perfPreview');
+      box.innerHTML = '<span style="color:var(--text-dim);">Importing from MT5…</span>';
+      try {
+        const r = await api(`/api/performance/backfill?days=${days}`, { method: 'POST' });
+        toast(`Imported ${r.imported} past trade(s)`, 'success');
+        box.innerHTML = `<span style="color:var(--text-dim);">Imported <b>${r.imported}</b> new, skipped ${r.skipped} (of ${r.positions} positions). Now click Preview / download.</span>`;
+      } catch (err) {
+        box.innerHTML = `<span style="color:var(--accent-red,#f85149);">${err.message}</span>`;
+        toast(`Import failed: ${err.message}`, 'error');
+      }
     },
 
     async restoreBot(id) {

@@ -52,6 +52,7 @@ class BollingerStrategy(BaseStrategy):
         std_dev: float = 2.0,
         sl_pips: float = 50,
         tp_pips: float = 100,
+        min_confidence: float = 0.20,
     ) -> None:
         super().__init__(sl_pips=sl_pips, tp_pips=tp_pips)
 
@@ -62,6 +63,8 @@ class BollingerStrategy(BaseStrategy):
 
         self.period = period
         self.std_dev = std_dev
+        # Skip low-conviction reversals (wide bands = no squeeze edge).
+        self.min_confidence = min_confidence
 
     # ------------------------------------------------------------------
     # Interface
@@ -121,6 +124,14 @@ class BollingerStrategy(BaseStrategy):
         bandwidth = (curr_upper - curr_lower) / curr_sma if curr_sma != 0 else 0
         # Invert so tighter bands → higher confidence, cap at 1.0
         confidence = min(1.0 / (1.0 + bandwidth * 50), 1.0) if bandwidth > 0 else 0.0
+
+        # Skip low-conviction setups.
+        if confidence < self.min_confidence:
+            logger.debug(
+                "[%s] %s — confidence %.3f below min %.3f, skipping.",
+                self.name, symbol, confidence, self.min_confidence,
+            )
+            return self._hold(symbol)
 
         # ---- Signal detection ----
         # BUY: price was below lower band and crossed back above it

@@ -76,6 +76,36 @@ class BotHistoryDB:
 
             CREATE INDEX IF NOT EXISTS idx_events_bot
                 ON bot_events(bot_id, timestamp);
+
+            CREATE TABLE IF NOT EXISTS trades (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                bot_id        INTEGER,
+                ticket        INTEGER UNIQUE,
+                symbol        TEXT    NOT NULL,
+                strategy      TEXT    NOT NULL DEFAULT '',
+                action        TEXT    NOT NULL DEFAULT '',
+                lot           REAL    NOT NULL DEFAULT 0,
+                entry_price   REAL    NOT NULL DEFAULT 0,
+                sl            REAL    NOT NULL DEFAULT 0,
+                tp            REAL    NOT NULL DEFAULT 0,
+                open_time     TEXT    NOT NULL,
+                close_time    TEXT,
+                exit_price    REAL,
+                profit        REAL,
+                swap          REAL    DEFAULT 0,
+                commission    REAL    DEFAULT 0,
+                pips          REAL,
+                duration_sec  INTEGER,
+                exit_reason   TEXT,
+                reason        TEXT    DEFAULT '',
+                confidence    REAL,
+                status        TEXT    NOT NULL DEFAULT 'OPEN'
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_trades_bot
+                ON trades(bot_id, open_time);
+            CREATE INDEX IF NOT EXISTS idx_trades_ticket
+                ON trades(ticket);
         """)
         conn.commit()
         self.logger.info("Bot history DB ready at %s", self._db_path)
@@ -210,6 +240,200 @@ class BotHistoryDB:
             conn.commit()
         except Exception as exc:
             self.logger.warning("increment_trades failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    #  Per-trade performance (live trades)
+    # ------------------------------------------------------------------
+    def record_trade_open(
+        self,
+        bot_id: int,
+        ticket: int,
+        symbol: str,
+        strategy: str,
+        action: str,
+        lot: float,
+        entry_price: float,
+        sl: float,
+        tp: float,
+        reason: str = "",
+        confidence: float | None = None,
+        open_time: str | None = None,
+    ) -> None:
+        """Insert an OPEN trade row keyed by the MT5 position ``ticket``.
+
+        Called when a live order is accepted by the broker.  The matching
+        close is recorded later via :meth:`record_trade_close`.
+        """
+        now = open_time or datetime.now(timezone.utc).isoformat()
+        conn = self._conn()
+        try:
+            conn.execute(
+                """INSERT OR IGNORE INTO trades
+                   (bot_id, ticket, symbol, strategy, action, lot,
+                    entry_price, sl, tp, open_time, reason, confidence, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')""",
+                (
+                    bot_id, ticket, symbol, strategy, action, lot,
+                    entry_price, sl, tp, now, reason, confidence,
+                ),
+            )
+            conn.commit()
+        except Exception as exc:
+            self.logger.warning("record_trade_open failed: %s", exc)
+
+    def record_trade_close(
+        self,
+        ticket: int,
+        exit_price: float,
+        profit: float,
+        swap: float = 0.0,
+        commission: float = 0.0,
+        pips: float | None = None,
+        exit_reason: str = "UNKNOWN",
+        close_time: str | None = None,
+    ) -> bool:
+        """Mark a trade CLOSED and store its outcome.
+
+        Returns ``True`` if a matching OPEN row was updated.  Duration is
+        computed from the stored ``open_time`` when available.
+        """
+        now = close_time or datetime.now(timezone.utc).isoformat()
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT open_time, status FROM trades WHERE ticket = ?", (ticket,)
+            ).fetchone()
+            if row is None:
+                return False  # not a tracked trade (e.g. opened before this feature)
+
+            duration_sec = None
+            try:
+                opened = datetime.fromisoformat(row["open_time"])
+                closed = datetime.fromisoformat(now)
+                duration_sec = int((closed - opened).total_seconds())
+            except (ValueError, TypeError):
+                pass
+
+            conn.execute(
+                """UPDATE trades
+                   SET status = 'CLOSED', close_time = ?, exit_price = ?,
+                       profit = ?, swap = ?, commission = ?, pips = ?,
+                       duration_sec = ?, exit_reason = ?
+                   WHERE ticket = ?""",
+                (
+                    now, exit_price, profit, swap, commission, pips,
+                    duration_sec, exit_reason, ticket,
+                ),
+            )
+            conn.commit()
+            return True
+        except Exception as exc:
+            self.logger.warning("record_trade_close failed: %s", exc)
+            return False
+
+    def import_closed_trade(
+        self,
+        ticket: int,
+        symbol: str,
+        action: str,
+        lot: float,
+        entry_price: float,
+        exit_price: float,
+        profit: float,
+        open_time: str,
+        close_time: str,
+        swap: float = 0.0,
+        commission: float = 0.0,
+        pips: float | None = None,
+        exit_reason: str = "UNKNOWN",
+        bot_id: int | None = None,
+        strategy: str = "",
+        sl: float = 0.0,
+        tp: float = 0.0,
+        reason: str = "",
+    ) -> bool:
+        """Insert an already-CLOSED trade in one shot (used by MT5 backfill).
+
+        Idempotent: an existing ``ticket`` is left untouched so re-running the
+        import never duplicates rows.  Returns ``True`` if a new row was added.
+        """
+        duration_sec = None
+        try:
+            opened = datetime.fromisoformat(open_time)
+            closed = datetime.fromisoformat(close_time)
+            duration_sec = int((closed - opened).total_seconds())
+        except (ValueError, TypeError):
+            pass
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO trades
+                   (bot_id, ticket, symbol, strategy, action, lot, entry_price,
+                    sl, tp, open_time, close_time, exit_price, profit, swap,
+                    commission, pips, duration_sec, exit_reason, reason, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CLOSED')""",
+                (
+                    bot_id, ticket, symbol, strategy, action, lot, entry_price,
+                    sl, tp, open_time, close_time, exit_price, profit, swap,
+                    commission, pips, duration_sec, exit_reason, reason,
+                ),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as exc:
+            self.logger.warning("import_closed_trade failed: %s", exc)
+            return False
+
+    def get_trade_by_ticket(self, ticket: int) -> Optional[Dict[str, Any]]:
+        """Return a single trade row by its MT5 ticket, or ``None``."""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM trades WHERE ticket = ?", (ticket,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_open_trade_tickets(self, bot_id: int) -> List[int]:
+        """Return tickets of trades still marked OPEN for a bot."""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT ticket FROM trades WHERE bot_id = ? AND status = 'OPEN'",
+            (bot_id,),
+        ).fetchall()
+        return [r["ticket"] for r in rows]
+
+    def get_trades(
+        self,
+        bot_id: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        status: str | None = None,
+    ) -> List[Dict[str, Any]]:
+        """Return trades, optionally filtered by bot, ISO date range, status.
+
+        ``start``/``end`` are matched against ``open_time`` (ISO 8601), so a
+        lexical comparison is sufficient.  Results are oldest-first to make
+        equity-curve / drawdown computation straightforward.
+        """
+        clauses: List[str] = []
+        params: List[Any] = []
+        if bot_id is not None:
+            clauses.append("bot_id = ?")
+            params.append(bot_id)
+        if start:
+            clauses.append("open_time >= ?")
+            params.append(start)
+        if end:
+            clauses.append("open_time <= ?")
+            params.append(end)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        conn = self._conn()
+        rows = conn.execute(
+            f"SELECT * FROM trades{where} ORDER BY open_time ASC", params
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
     #  Queries

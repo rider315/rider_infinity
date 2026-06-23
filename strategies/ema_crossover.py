@@ -49,6 +49,9 @@ class EMACrossoverStrategy(BaseStrategy):
         slow_period: int = 21,
         sl_pips: float = 50,
         tp_pips: float = 100,
+        trend_period: int = 200,
+        use_trend_filter: bool = True,
+        min_confidence: float = 0.0,
     ) -> None:
         super().__init__(sl_pips=sl_pips, tp_pips=tp_pips)
 
@@ -60,6 +63,12 @@ class EMACrossoverStrategy(BaseStrategy):
 
         self.fast_period = fast_period
         self.slow_period = slow_period
+        # Trade only in the direction of the longer-term trend (filters out the
+        # counter-trend whipsaws that made raw crossovers unprofitable), and
+        # ignore weak crosses below a minimum confidence.
+        self.trend_period = trend_period
+        self.use_trend_filter = use_trend_filter
+        self.min_confidence = min_confidence
 
     # ------------------------------------------------------------------
     # Interface
@@ -107,8 +116,25 @@ class EMACrossoverStrategy(BaseStrategy):
         distance_pct = abs(curr_fast - curr_slow) / price
         confidence = min(distance_pct * 100, 1.0)  # scale up, cap at 1.0
 
+        # ---- Trend filter ----
+        # Only trade with the longer-term trend.  When there isn't enough data
+        # for the trend EMA we skip the filter rather than block trading.
+        trend_ok_buy = trend_ok_sell = True
+        if self.use_trend_filter and len(df) >= self.trend_period:
+            trend_ema = close.ewm(span=self.trend_period, adjust=False).mean().iloc[-1]
+            trend_ok_buy = price > trend_ema
+            trend_ok_sell = price < trend_ema
+
+        # Weak crosses are noise — require a minimum confidence.
+        if confidence < self.min_confidence:
+            logger.debug(
+                "[%s] %s — cross below min confidence (%.3f < %.3f), skipping.",
+                self.name, symbol, confidence, self.min_confidence,
+            )
+            return self._hold(symbol)
+
         # ---- Crossover detection ----
-        if prev_fast <= prev_slow and curr_fast > curr_slow:
+        if prev_fast <= prev_slow and curr_fast > curr_slow and trend_ok_buy:
             reason = (
                 f"Bullish EMA crossover: fast EMA({self.fast_period})={curr_fast:.5f} "
                 f"crossed above slow EMA({self.slow_period})={curr_slow:.5f}"
@@ -123,7 +149,7 @@ class EMACrossoverStrategy(BaseStrategy):
                 reason=reason,
             )
 
-        if prev_fast >= prev_slow and curr_fast < curr_slow:
+        if prev_fast >= prev_slow and curr_fast < curr_slow and trend_ok_sell:
             reason = (
                 f"Bearish EMA crossover: fast EMA({self.fast_period})={curr_fast:.5f} "
                 f"crossed below slow EMA({self.slow_period})={curr_slow:.5f}"

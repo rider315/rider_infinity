@@ -236,6 +236,67 @@ class RiskManager:
 
         return lot_size
 
+    def _pip_value_per_lot(self, symbol: str) -> float:
+        """Monetary value of a 1-pip move for 1.0 lot, or 0.0 if unknown."""
+        sym_info = mt5.symbol_info(symbol)
+        if sym_info is None:
+            return 0.0
+        tick_value = sym_info.trade_tick_value
+        tick_size = sym_info.trade_tick_size
+        point = sym_info.point
+        if tick_size == 0 or point == 0:
+            return 0.0
+        pip_points = 10 if sym_info.digits in (3, 5) else 1
+        return tick_value * (pip_points * point) / tick_size
+
+    def cap_lot_for_max_loss(
+        self, symbol: str, sl_pips: float, lot: float,
+    ) -> Tuple[float, str]:
+        """Shrink *lot* so the worst-case SL loss can't exceed the per-trade cap.
+
+        The cap is ``config.max_loss_per_trade_pct`` of current equity.  This is
+        the hard safety net that makes a single catastrophic loss (e.g. the
+        −$164 trade) structurally impossible regardless of strategy or lot mode.
+
+        Returns ``(capped_lot, note)``.  ``capped_lot`` is ``0.0`` when even the
+        minimum volume would breach the cap — the caller must then skip the trade.
+        """
+        max_pct = getattr(self.config, "max_loss_per_trade_pct", 0.0)
+        if max_pct <= 0 or sl_pips <= 0:
+            return (lot, "OK")
+
+        account = self.connector.get_account_info()
+        sym_info = mt5.symbol_info(symbol)
+        pip_value = self._pip_value_per_lot(symbol)
+        if account is None or sym_info is None or pip_value <= 0:
+            return (lot, "OK")  # can't evaluate — don't block
+
+        max_loss = account["equity"] * (max_pct / 100.0)
+        worst_case = lot * sl_pips * pip_value
+        if worst_case <= max_loss:
+            return (lot, "OK")
+
+        # Reduce lot to fit the cap, rounded down to the volume step.
+        safe_lot = max_loss / (sl_pips * pip_value)
+        step = sym_info.volume_step or 0.01
+        safe_lot = (int(safe_lot / step)) * step
+        safe_lot = round(safe_lot, 8)
+
+        if safe_lot < sym_info.volume_min:
+            self.logger.warning(
+                "%s: even %.2f lots risks > %.1f%% cap ($%.2f) at SL=%.1f pips "
+                "— skipping trade.",
+                symbol, sym_info.volume_min, max_pct, max_loss, sl_pips,
+            )
+            return (0.0, f"Min lot risks more than {max_pct:.1f}% cap")
+
+        self.logger.info(
+            "%s: lot reduced %.2f → %.2f to respect %.1f%% max-loss cap "
+            "($%.2f at SL=%.1f pips).",
+            symbol, lot, safe_lot, max_pct, max_loss, sl_pips,
+        )
+        return (safe_lot, "capped")
+
     # ------------------------------------------------------------------
     # Pre-trade gate checks
     # ------------------------------------------------------------------

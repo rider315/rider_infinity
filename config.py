@@ -105,6 +105,23 @@ class Config:
         self.default_sl_pips: int = int(os.getenv("DEFAULT_SL_PIPS", "50"))
         self.default_tp_pips: int = int(os.getenv("DEFAULT_TP_PIPS", "100"))
 
+        # --- Volatility-based stops & hard per-trade loss cap ------------
+        # These exist to stop the "tiny win / huge loss" pattern: SL/TP are
+        # sized from recent ATR (so gold & GBP get appropriately wider/narrower
+        # stops), a minimum reward:risk ratio is enforced, and no single trade
+        # may risk more than ``max_loss_per_trade_pct`` of equity.
+        self.use_atr_stops: bool = (
+            os.getenv("USE_ATR_STOPS", "true").lower() in ("true", "1", "yes")
+        )
+        self.atr_period: int = int(os.getenv("ATR_PERIOD", "14"))
+        self.atr_sl_mult: float = float(os.getenv("ATR_SL_MULT", "1.5"))
+        self.min_rr_ratio: float = float(os.getenv("MIN_RR_RATIO", "1.8"))
+        self.min_sl_pips: float = float(os.getenv("MIN_SL_PIPS", "8"))
+        self.max_sl_pips: float = float(os.getenv("MAX_SL_PIPS", "60"))
+        self.max_loss_per_trade_pct: float = float(
+            os.getenv("MAX_LOSS_PER_TRADE_PCT", "1.0")
+        )
+
         # --- Bot settings ------------------------------------------------
         self.magic_number: int = int(os.getenv("MAGIC_NUMBER", "123456"))
         self.dry_run: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")

@@ -118,6 +118,30 @@ def pips_to_price(pips: float, symbol: str, point: float) -> float:
     return pips * pip_size
 
 
+def compute_atr(df, period: int = 14) -> float:
+    """Return the latest Average True Range (a *price* value) from OHLC data.
+
+    Uses Wilder's true range = max(high-low, |high-prev_close|, |low-prev_close|)
+    smoothed by a simple moving average over *period* bars.  Returns ``0.0`` if
+    the data is insufficient or the required columns are missing.
+    """
+    try:
+        if df is None or len(df) < period + 1:
+            return 0.0
+        if not {"high", "low", "close"}.issubset(df.columns):
+            return 0.0
+        high = df["high"]
+        low = df["low"]
+        prev_close = df["close"].shift(1)
+        tr = (high - low).abs()
+        tr = tr.combine((high - prev_close).abs(), max)
+        tr = tr.combine((low - prev_close).abs(), max)
+        atr = tr.rolling(window=period).mean().iloc[-1]
+        return float(atr) if atr == atr else 0.0  # NaN guard
+    except Exception:
+        return 0.0
+
+
 def price_to_pips(price_delta: float, symbol: str, point: float) -> float:
     """Convert a price delta to pips for *symbol* (inverse of
     :func:`pips_to_price`).

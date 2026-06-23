@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
+from datetime import timedelta
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -36,7 +38,7 @@ from risk_manager import RiskManager
 from session_manager import SessionManager
 from strategies import get_strategy, list_strategies
 from strategies.base import SignalAction
-from utils import pips_to_price, save_trade_to_journal, setup_logger
+from utils import compute_atr, pips_to_price, price_to_pips, save_trade_to_journal, setup_logger
 from bot_history import BotHistoryDB
 
 
@@ -465,7 +467,7 @@ class MultiBotManager:
                         )
                     else:
                         bot.blocked_reason = ""  # clear on attempt
-                        self._execute_signal(bot, signal, logger)
+                        self._execute_signal(bot, signal, df, logger)
                 else:
                     bot.blocked_reason = ""  # clear when no signal
 
@@ -486,17 +488,74 @@ class MultiBotManager:
 
         bot.status = BotStatus.STOPPED
 
-    def _execute_signal(self, bot: BotInstance, signal, logger: logging.Logger) -> None:
+    def _resolve_sl_tp(self, signal, df, symbol: str, point: float) -> tuple[float, float]:
+        """Return (sl_pips, tp_pips) sized for volatility, clamped, with RR floor.
+
+        * If ``config.use_atr_stops`` is on and ATR is available, the stop is
+          set to ``atr_sl_mult × ATR`` (converted to pips) — so volatile
+          instruments like gold get wider stops and calm pairs get tighter ones.
+        * The stop is clamped to ``[min_sl_pips, max_sl_pips]`` so it can never
+          be absurdly wide (the root cause of the runaway losses).
+        * The take-profit is forced to at least ``min_rr_ratio × sl_pips`` so a
+          high win-rate can't be wrecked by tiny wins vs large losses.
+        """
+        cfg = self.config
+        rr = getattr(cfg, "min_rr_ratio", 1.8)
+        # Baseline from the strategy's own suggestion (or global defaults).
+        sl_pips = float(signal.sl_pips or cfg.default_sl_pips)
+        tp_pips = float(signal.tp_pips or cfg.default_tp_pips)
+        atr_based = False
+
+        if getattr(cfg, "use_atr_stops", False) and point > 0:
+            atr_price = compute_atr(df, getattr(cfg, "atr_period", 14))
+            if atr_price > 0:
+                atr_pips = price_to_pips(atr_price * cfg.atr_sl_mult, symbol, point)
+                if atr_pips > 0:
+                    sl_pips = atr_pips
+                    atr_based = True
+
+        # Clamp the stop distance to sane bounds.
+        sl_pips = max(cfg.min_sl_pips, min(cfg.max_sl_pips, sl_pips))
+
+        if atr_based:
+            # Volatility-based: scale TP proportionally so it's actually
+            # reachable (a fixed far-away TP is why trades rarely hit profit).
+            tp_pips = sl_pips * rr
+        else:
+            # Fixed-pip fallback: keep the suggested TP but never below the RR floor.
+            tp_pips = max(tp_pips, sl_pips * rr)
+        return round(sl_pips, 1), round(tp_pips, 1)
+
+    def _execute_signal(self, bot: BotInstance, signal, df, logger: logging.Logger) -> None:
         """Place an order for a bot's signal."""
         symbol = signal.symbol or bot.symbol
-        sl_pips = signal.sl_pips or self.config.default_sl_pips
-        tp_pips = signal.tp_pips or self.config.default_tp_pips
 
-        # Lot size
+        # Symbol metadata (needed for volatility-based stops & pip conversion).
+        tick = self.market_data.get_tick(symbol)
+        if tick is None:
+            return
+        sym_info = self.market_data.get_symbol_info(symbol)
+        if sym_info is None:
+            return
+        point = sym_info["point"]
+        digits = sym_info["digits"]
+
+        # ---- Resolve SL/TP: volatility-aware, capped, with an RR floor -----
+        sl_pips, tp_pips = self._resolve_sl_tp(signal, df, symbol, point)
+
+        # Lot size (risk-based when auto, otherwise the bot's fixed lot)
         if bot.lot_mode == "auto":
             lot = self.risk_mgr.calculate_lot_size(symbol, sl_pips)
         else:
             lot = bot.lot_size
+
+        # Hard per-trade loss cap — shrinks (or rejects) the lot so a single
+        # trade can never lose more than config.max_loss_per_trade_pct of equity.
+        lot, cap_note = self.risk_mgr.cap_lot_for_max_loss(symbol, sl_pips, lot)
+        if lot <= 0:
+            bot.blocked_reason = cap_note
+            logger.info("Bot#%d trade blocked: %s", bot.bot_id, cap_note)
+            return
 
         # Risk check
         can, reason = self.risk_mgr.can_trade(symbol, lot)
@@ -505,17 +564,6 @@ class MultiBotManager:
             logger.info("Bot#%d trade blocked: %s", bot.bot_id, reason)
             return
         bot.blocked_reason = ""  # clear on successful attempt
-
-        # SL / TP prices
-        tick = self.market_data.get_tick(symbol)
-        if tick is None:
-            return
-        sym_info = self.market_data.get_symbol_info(symbol)
-        if sym_info is None:
-            return
-
-        point = sym_info["point"]
-        digits = sym_info["digits"]
 
         if signal.action == SignalAction.BUY:
             order_type = mt5.ORDER_TYPE_BUY
@@ -597,6 +645,23 @@ class MultiBotManager:
                 "confidence": signal.confidence,
                 "dry_run": False,
             })
+            # Record the open leg for per-trade performance tracking.
+            # The matching close (exit price / profit / reason) is filled in
+            # later by _sync_position_state when the ticket disappears.
+            if ticket:
+                self.history_db.record_trade_open(
+                    bot_id=bot.bot_id,
+                    ticket=ticket,
+                    symbol=symbol,
+                    strategy=bot.strategy_name,
+                    action=signal.action.value,
+                    lot=lot,
+                    entry_price=entry,
+                    sl=sl_price,
+                    tp=tp_price,
+                    reason=signal.reason or "",
+                    confidence=signal.confidence,
+                )
         else:
             msg = OrderManager.get_retcode_message(result.get("retcode", -1))
             logger.error("Bot#%d order failed: %s", bot.bot_id, msg)
@@ -660,6 +725,8 @@ class MultiBotManager:
                     "clearing from dashboard.",
                     bot.bot_id, list(closed),
                 )
+                for ticket in closed:
+                    self._record_closed_trade(bot, ticket, logger)
 
             # Update tracking
             bot.active_tickets = still_open
@@ -683,6 +750,178 @@ class MultiBotManager:
             logger.debug(
                 "Bot#%d position sync check failed: %s", bot.bot_id, exc,
             )
+
+    # Map MT5 deal reason codes to human-readable exit reasons.
+    _DEAL_REASON_MAP = {
+        0: "MANUAL",      # DEAL_REASON_CLIENT
+        1: "MANUAL",      # DEAL_REASON_MOBILE
+        2: "MANUAL",      # DEAL_REASON_WEB
+        3: "EXPERT",      # DEAL_REASON_EXPERT
+        4: "SL",          # DEAL_REASON_SL
+        5: "TP",          # DEAL_REASON_TP
+        6: "STOP_OUT",    # DEAL_REASON_SO
+        7: "ROLLOVER",    # DEAL_REASON_ROLLOVER
+    }
+
+    def _record_closed_trade(
+        self, bot: "BotInstance", ticket: int, logger: logging.Logger
+    ) -> None:
+        """Fetch MT5 deal history for a closed position and persist its outcome.
+
+        Sums the closing (``DEAL_ENTRY_OUT``) deals for the position to obtain
+        net profit, swap and commission, derives the exit reason from the deal
+        ``reason`` code, and updates the matching trade row.
+        """
+        try:
+            deals = mt5.history_deals_get(position=ticket)
+            if not deals:
+                logger.debug("Bot#%d no deal history for closed #%s", bot.bot_id, ticket)
+                return
+
+            exit_price = 0.0
+            profit = swap = commission = 0.0
+            close_epoch = 0
+            reason_code = None
+            for d in deals:
+                # DEAL_ENTRY_OUT == 1 (also OUT_BY == 2 for hedged closes)
+                if getattr(d, "entry", 0) in (1, 2):
+                    profit += d.profit
+                    swap += getattr(d, "swap", 0.0)
+                    commission += getattr(d, "commission", 0.0)
+                    exit_price = d.price
+                    close_epoch = max(close_epoch, getattr(d, "time", 0))
+                    reason_code = getattr(d, "reason", None)
+
+            exit_reason = self._DEAL_REASON_MAP.get(reason_code, "UNKNOWN")
+            close_time = (
+                datetime.utcfromtimestamp(close_epoch).isoformat()
+                if close_epoch else None
+            )
+
+            # Pips relative to the stored entry, if we can resolve point size.
+            pips = None
+            try:
+                trade_row = self.history_db.get_trade_by_ticket(ticket)
+                sym_info = self.market_data.get_symbol_info(bot.symbol)
+                if trade_row and sym_info and trade_row.get("entry_price"):
+                    point = sym_info["point"]
+                    pip_size = point * 10 if sym_info.get("digits", 5) in (3, 5) else point
+                    diff = exit_price - trade_row["entry_price"]
+                    # SELL trades profit when price falls
+                    if trade_row["action"] == "SELL":
+                        diff = -diff
+                    pips = round(diff / pip_size, 1) if pip_size else None
+            except Exception:
+                pips = None
+
+            updated = self.history_db.record_trade_close(
+                ticket=ticket,
+                exit_price=exit_price,
+                profit=round(profit, 2),
+                swap=round(swap, 2),
+                commission=round(commission, 2),
+                pips=pips,
+                exit_reason=exit_reason,
+                close_time=close_time,
+            )
+            if updated:
+                logger.info(
+                    "Bot#%d trade #%s closed: %s profit=%.2f reason=%s",
+                    bot.bot_id, ticket, bot.symbol, profit, exit_reason,
+                )
+        except Exception as exc:
+            logger.debug("Bot#%d _record_closed_trade(#%s) failed: %s",
+                         bot.bot_id, ticket, exc)
+
+    def backfill_trades_from_mt5(self, days: int = 90) -> dict:
+        """Reconstruct past CLOSED live trades from MT5 deal history.
+
+        Groups account deals by ``position_id``, pairs the entry (IN) deal with
+        its close (OUT) deals, and imports each completed position into the
+        ``trades`` table.  Idempotent — re-running skips already-imported
+        tickets.  Bot id / strategy are parsed from the deal comment
+        (``Bot#<id>|<strategy>``) when present.
+
+        Returns a summary dict: ``{"imported", "positions", "skipped"}``.
+        """
+        logger = logging.getLogger("MultiBot")
+        to_date = datetime.now() + timedelta(days=1)
+        from_date = datetime.now() - timedelta(days=max(1, days))
+        try:
+            deals = mt5.history_deals_get(from_date, to_date)
+        except Exception as exc:
+            logger.error("backfill: history_deals_get failed: %s", exc)
+            return {"imported": 0, "positions": 0, "skipped": 0, "error": str(exc)}
+        if not deals:
+            return {"imported": 0, "positions": 0, "skipped": 0}
+
+        groups: dict[int, list] = {}
+        for d in deals:
+            pid = getattr(d, "position_id", 0)
+            if pid:
+                groups.setdefault(pid, []).append(d)
+
+        imported = skipped = 0
+        for pid, dl in groups.items():
+            in_deals = [d for d in dl if getattr(d, "entry", -1) == 0]      # DEAL_ENTRY_IN
+            out_deals = [d for d in dl if getattr(d, "entry", -1) in (1, 3)]  # OUT / OUT_BY
+            if not in_deals or not out_deals:
+                skipped += 1  # still open, or incomplete history
+                continue
+
+            ind = in_deals[0]
+            symbol = ind.symbol
+            action = "BUY" if ind.type == 0 else "SELL"  # DEAL_TYPE_BUY == 0
+            entry_price = ind.price
+            open_time = datetime.utcfromtimestamp(ind.time).isoformat()
+
+            profit = sum(d.profit for d in out_deals)
+            swap = sum(getattr(d, "swap", 0.0) for d in dl)
+            commission = sum(getattr(d, "commission", 0.0) for d in dl)
+            exit_price = out_deals[-1].price
+            close_time = datetime.utcfromtimestamp(
+                max(d.time for d in out_deals)
+            ).isoformat()
+            exit_reason = self._DEAL_REASON_MAP.get(
+                getattr(out_deals[-1], "reason", None), "UNKNOWN"
+            )
+
+            # Attribute to a bot via the comment, if it follows our convention.
+            comment = ind.comment or out_deals[-1].comment or ""
+            bot_id = None
+            strategy = ""
+            m = re.match(r"Bot#(\d+)\|?(.*)", comment)
+            if m:
+                bot_id = int(m.group(1))
+                strategy = m.group(2)
+
+            pips = None
+            try:
+                si = mt5.symbol_info(symbol)
+                if si:
+                    pip_size = si.point * 10 if si.digits in (3, 5) else si.point
+                    diff = exit_price - entry_price
+                    if action == "SELL":
+                        diff = -diff
+                    pips = round(diff / pip_size, 1) if pip_size else None
+            except Exception:
+                pips = None
+
+            if self.history_db.import_closed_trade(
+                ticket=pid, symbol=symbol, action=action, lot=ind.volume,
+                entry_price=entry_price, exit_price=exit_price,
+                profit=round(profit, 2), open_time=open_time, close_time=close_time,
+                swap=round(swap, 2), commission=round(commission, 2), pips=pips,
+                exit_reason=exit_reason, bot_id=bot_id, strategy=strategy,
+                reason=comment,
+            ):
+                imported += 1
+            else:
+                skipped += 1  # already imported
+
+        logger.info("backfill: imported=%d skipped=%d positions=%d",
+                    imported, skipped, len(groups))
+        return {"imported": imported, "positions": len(groups), "skipped": skipped}
 
     @staticmethod
     def _seconds_until_next_candle(timeframe_key: str) -> int:

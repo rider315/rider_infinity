@@ -20,8 +20,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
+import performance
 from config import Config, SYMBOL_GROUPS, TIMEFRAME_OPTIONS, TIMEFRAME_MAP
 from market_data import MarketDataFeed
 from mt5_connector import MT5Connector
@@ -424,6 +425,93 @@ def create_app() -> Flask:
             return jsonify(rows[:100])  # cap at 100 trades
         except Exception as exc:
             logger.error("GET /api/bot-history/%d/trades error: %s", bot_id, exc)
+            return jsonify({"error": str(exc)}), 500
+
+    # ==================================================================
+    #  Performance export (per-trade outcomes + metrics)
+    # ==================================================================
+    def _perf_filters() -> dict:
+        """Parse common performance query params: bot_id, start, end, slab."""
+        bot_id = request.args.get("bot_id", type=int)
+        start = request.args.get("start") or None  # ISO date e.g. 2026-06-01
+        end = request.args.get("end") or None
+        slab = request.args.get("slab", "daily")
+        if slab not in ("daily", "weekly", "monthly"):
+            slab = "daily"
+        # Make an inclusive end-of-day for a bare date.
+        if end and len(end) == 10:
+            end = end + "T23:59:59"
+        return {"bot_id": bot_id, "start": start, "end": end, "slab": slab}
+
+    @app.route("/api/performance/trades", methods=["GET"])
+    def api_performance_trades():
+        """Return per-trade outcome rows as JSON (for the UI table)."""
+        try:
+            f = _perf_filters()
+            trades = _bot_mgr.history_db.get_trades(
+                bot_id=f["bot_id"], start=f["start"], end=f["end"],
+            )
+            return jsonify(trades)
+        except Exception as exc:
+            logger.error("GET /api/performance/trades error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/performance/trades.csv", methods=["GET"])
+    def api_performance_trades_csv():
+        """Download every trade (open + close detail) as a CSV file."""
+        try:
+            f = _perf_filters()
+            trades = _bot_mgr.history_db.get_trades(
+                bot_id=f["bot_id"], start=f["start"], end=f["end"],
+            )
+            csv_text = performance.trades_to_csv(trades)
+            scope = f"bot{f['bot_id']}" if f["bot_id"] else "all"
+            fname = f"trades_{scope}_{datetime.utcnow():%Y%m%d_%H%M%S}.csv"
+            return Response(
+                csv_text,
+                mimetype="text/csv",
+                headers={"Content-Disposition": f"attachment; filename={fname}"},
+            )
+        except Exception as exc:
+            logger.error("GET /api/performance/trades.csv error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/performance/summary", methods=["GET"])
+    def api_performance_summary():
+        """Return computed performance metrics (overall + time-slab breakdowns)."""
+        try:
+            f = _perf_filters()
+            trades = _bot_mgr.history_db.get_trades(
+                bot_id=f["bot_id"], start=f["start"], end=f["end"],
+            )
+            summary = performance.build_summary(
+                trades, slab=f["slab"], bot_id=f["bot_id"],
+                start=f["start"], end=f["end"],
+            )
+            # ?download=1 streams the same JSON as a file attachment.
+            if request.args.get("download"):
+                import json as _json
+                scope = f"bot{f['bot_id']}" if f["bot_id"] else "all"
+                fname = f"performance_{scope}_{datetime.utcnow():%Y%m%d_%H%M%S}.json"
+                return Response(
+                    _json.dumps(summary, indent=2),
+                    mimetype="application/json",
+                    headers={"Content-Disposition": f"attachment; filename={fname}"},
+                )
+            return jsonify(summary)
+        except Exception as exc:
+            logger.error("GET /api/performance/summary error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/performance/backfill", methods=["POST"])
+    def api_performance_backfill():
+        """Import past CLOSED live trades from MT5 deal history into the DB."""
+        try:
+            days = request.args.get("days", default=90, type=int)
+            result = _bot_mgr.backfill_trades_from_mt5(days=days)
+            return jsonify(result)
+        except Exception as exc:
+            logger.error("POST /api/performance/backfill error: %s", exc)
             return jsonify({"error": str(exc)}), 500
 
     @app.route("/api/bot-history/<int:bot_id>/restore", methods=["POST"])
