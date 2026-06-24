@@ -47,7 +47,8 @@ def session_for_hour(h):
 
 
 def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5,
-        hour_window=None):
+        hour_window=None, direction_filter=None, trend_filter=False,
+        trend_period=200):
     pv = pip_value_per_lot(symbol, point)
     total = len(df)
     warmup = min(200, total // 3)
@@ -112,6 +113,15 @@ def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5,
         if sig and sig.action in (SignalAction.BUY, SignalAction.SELL):
             h = int(bar["time"].hour)
             in_window = hour_window is None or (hour_window[0] <= h < hour_window[1])
+            if direction_filter and sig.action.value != direction_filter:
+                in_window = False
+            if trend_filter and in_window:
+                ema = window["close"].ewm(span=trend_period, adjust=False).mean().iloc[-1]
+                price = window["close"].iloc[-1]
+                if sig.action == SignalAction.BUY and not price > ema:
+                    in_window = False
+                if sig.action == SignalAction.SELL and not price < ema:
+                    in_window = False
             if in_window:
                 if mode == "NEW":
                     sl_pips, tp_pips = resolve_sl_tp_new(window, symbol, point)

@@ -40,12 +40,20 @@ def trades_to_csv(trades: List[Dict[str, Any]]) -> str:
 
 def _to_perf_trade(run: Dict[str, Any], t: Dict[str, Any]) -> Dict[str, Any]:
     """Map a stored backtest-trade row onto the live-trade schema used here."""
+    duration_sec = None
+    try:
+        et = datetime.fromisoformat(t.get("entry_time", ""))
+        xt = datetime.fromisoformat(t.get("exit_time", ""))
+        duration_sec = int((xt - et).total_seconds())
+    except (ValueError, TypeError):
+        pass
     return {
         "status": "CLOSED",
         "profit": t.get("pnl_money"),
         "pips": t.get("pnl_pips"),
         "open_time": t.get("entry_time", ""),
         "close_time": t.get("exit_time", ""),
+        "duration_sec": duration_sec,
         "strategy": run.get("strategy_name", ""),
         "symbol": run.get("symbol", ""),
         "action": t.get("direction", ""),

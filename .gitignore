@@ -63,3 +63,9 @@ node_modules/
 
 # MT5 stub (only used on Linux EC2)
 MetaTrader5.py
+
+# ── Claude Code ───────────────────────────────────────────────
+.claude/settings.local.json
+
+# ── Graphify knowledge graph output ──────────────────────────
+graphify-out/
