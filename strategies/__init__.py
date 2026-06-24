@@ -20,6 +20,11 @@ from .news_strategy import NewsStrategy
 from .grid_strategy import GridStrategy
 from .dca_strategy import DCAStrategy
 from .dsl_strategy import DSLStrategy
+from .donchian_momentum_strategy import DonchianMomentumStrategy
+from .mean_reversion_strategy import MeanReversionStrategy
+from .opening_range_strategy import OpeningRangeBreakoutStrategy
+from .liquidity_sweep_strategy import LiquiditySweepStrategy
+from .regime_switch_strategy import RegimeSwitchStrategy
 
 STRATEGY_REGISTRY: dict[str, tuple[type, str]] = {
     "ema": (EMACrossoverStrategy, "EMA Crossover — Trend Following"),
@@ -30,6 +35,11 @@ STRATEGY_REGISTRY: dict[str, tuple[type, str]] = {
     "grid": (GridStrategy, "Grid Trading — Volatility Harvesting"),
     "dca": (DCAStrategy, "DCA — Dollar Cost Averaging"),
     "dsl": (DSLStrategy, "DSL — Custom Rule Engine"),
+    "donchian": (DonchianMomentumStrategy, "Donchian Momentum — CTA Trend Following"),
+    "meanrev": (MeanReversionStrategy, "Statistical Mean Reversion — Session Fade"),
+    "orb": (OpeningRangeBreakoutStrategy, "Opening Range Breakout — Session Volatility"),
+    "sweep": (LiquiditySweepStrategy, "Liquidity Sweep — Stop-Run Reversal"),
+    "regime": (RegimeSwitchStrategy, "Regime Switch — Adaptive Trend/Range"),
 }
 
 
