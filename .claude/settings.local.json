@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(python -c ' *)",
-      "Bash(python -m py_compile bot_history.py multi_bot.py dashboard.py performance.py)"
+      "Bash(python -m py_compile bot_history.py multi_bot.py dashboard.py performance.py)",
+      "PowerShell(\\(Get-Location\\).Path)"
     ]
   }
 }
