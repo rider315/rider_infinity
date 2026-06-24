@@ -110,8 +110,11 @@ class Config:
         # sized from recent ATR (so gold & GBP get appropriately wider/narrower
         # stops), a minimum reward:risk ratio is enforced, and no single trade
         # may risk more than ``max_loss_per_trade_pct`` of equity.
+        # NOTE: default OFF. A/B backtest showed ATR stops lower drawdown but
+        # over-trade and erode the edge of mean-reversion strategies (RSI in
+        # particular). Enable per preference for trend strategies / lower DD.
         self.use_atr_stops: bool = (
-            os.getenv("USE_ATR_STOPS", "true").lower() in ("true", "1", "yes")
+            os.getenv("USE_ATR_STOPS", "false").lower() in ("true", "1", "yes")
         )
         self.atr_period: int = int(os.getenv("ATR_PERIOD", "14"))
         self.atr_sl_mult: float = float(os.getenv("ATR_SL_MULT", "1.5"))

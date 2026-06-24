@@ -50,7 +50,7 @@ class EMACrossoverStrategy(BaseStrategy):
         sl_pips: float = 50,
         tp_pips: float = 100,
         trend_period: int = 200,
-        use_trend_filter: bool = True,
+        use_trend_filter: bool = False,
         min_confidence: float = 0.0,
     ) -> None:
         super().__init__(sl_pips=sl_pips, tp_pips=tp_pips)

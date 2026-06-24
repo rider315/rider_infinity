@@ -1,0 +1,173 @@
+"""
+ab_backtest.py — One-off A/B harness comparing the OLD vs NEW trade logic.
+
+Replays real MT5 history bar-by-bar (entry at next bar's open, intrabar SL/TP)
+and runs each strategy twice:
+
+* OLD  — fixed 50/100-pip SL/TP, EMA trend filter OFF, Bollinger gate OFF.
+* NEW  — ATR-based SL (1.5xATR, clamped 8-60), TP = SL x 1.8, EMA trend
+         filter ON, Bollinger confidence gate ON.
+
+This is a diagnostic script, not part of the bot. Delete when done.
+"""
+from __future__ import annotations
+import datetime as dt
+import MetaTrader5 as mt5
+import pandas as pd
+
+from config import Config, TIMEFRAME_MAP
+from strategies import get_strategy
+from strategies.base import SignalAction
+from utils import compute_atr, pips_to_price, price_to_pips
+
+cfg = Config()
+
+
+def pip_value_per_lot(symbol: str, point: float) -> float:
+    return 1000.0 * point * 100 if "JPY" in symbol.upper() else 10.0
+
+
+def resolve_sl_tp_new(window, symbol, point):
+    """Mirror multi_bot._resolve_sl_tp for ATR stops + RR floor."""
+    atr_price = compute_atr(window, cfg.atr_period)
+    sl = 50.0
+    if atr_price > 0:
+        atr_pips = price_to_pips(atr_price * cfg.atr_sl_mult, symbol, point)
+        if atr_pips > 0:
+            sl = atr_pips
+    sl = max(cfg.min_sl_pips, min(cfg.max_sl_pips, sl))
+    return round(sl, 1), round(sl * cfg.min_rr_ratio, 1)
+
+
+def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5):
+    pv = pip_value_per_lot(symbol, point)
+    total = len(df)
+    warmup = min(200, total // 3)
+    equity = 10000.0
+    peak = equity
+    max_dd = 0.0
+    open_tr, closed, pending = [], [], None
+
+    for i in range(warmup, total):
+        bar = df.iloc[i]
+        # execute pending at this open
+        if pending is not None and len(open_tr) < max_open:
+            sig, sl_pips, tp_pips = pending
+            ep = bar["open"]
+            if sig.action == SignalAction.BUY:
+                sl_p = round(ep - pips_to_price(sl_pips, symbol, point), digits)
+                tp_p = round(ep + pips_to_price(tp_pips, symbol, point), digits)
+                d = "BUY"
+            else:
+                sl_p = round(ep + pips_to_price(sl_pips, symbol, point), digits)
+                tp_p = round(ep - pips_to_price(tp_pips, symbol, point), digits)
+                d = "SELL"
+            open_tr.append({"dir": d, "ep": ep, "sl": sl_p, "tp": tp_p})
+        pending = None
+
+        # check SL/TP
+        still = []
+        for t in open_tr:
+            hi, lo = bar["high"], bar["low"]
+            exit_p = None
+            if t["dir"] == "BUY":
+                if lo <= t["sl"]:
+                    exit_p = t["sl"]
+                elif hi >= t["tp"]:
+                    exit_p = t["tp"]
+                delta = (exit_p - t["ep"]) if exit_p else 0
+            else:
+                if hi >= t["sl"]:
+                    exit_p = t["sl"]
+                elif lo <= t["tp"]:
+                    exit_p = t["tp"]
+                delta = (t["ep"] - exit_p) if exit_p else 0
+            if exit_p is not None:
+                pnl = price_to_pips(delta, symbol, point) * pv * lot
+                equity += pnl
+                peak = max(peak, equity)
+                max_dd = max(max_dd, peak - equity)
+                closed.append(pnl)
+            else:
+                still.append(t)
+        open_tr = still
+
+        # signal on window
+        window = df.iloc[max(0, i - 499):i + 1].reset_index(drop=True)
+        try:
+            sig = strategy.analyze(window, symbol)
+        except Exception:
+            sig = None
+        if sig and sig.action in (SignalAction.BUY, SignalAction.SELL):
+            if mode == "NEW":
+                sl_pips, tp_pips = resolve_sl_tp_new(window, symbol, point)
+            else:
+                sl_pips, tp_pips = 50.0, 100.0
+            pending = (sig, sl_pips, tp_pips)
+
+    # metrics
+    n = len(closed)
+    wins = [p for p in closed if p > 0]
+    losses = [p for p in closed if p < 0]
+    gp, gl = sum(wins), abs(sum(losses))
+    pf = (gp / gl) if gl > 0 else float("inf")
+    return {
+        "mode": mode, "trades": n,
+        "win_rate": round(len(wins) / n * 100, 1) if n else 0.0,
+        "net": round(sum(closed), 2),
+        "pf": round(pf, 2) if pf != float("inf") else "inf",
+        "max_dd": round(max_dd, 2),
+        "worst": round(min(closed), 2) if closed else 0.0,
+    }
+
+
+def make(strategy_key, mode):
+    filtered = mode in ("FILT", "NEW")
+    if strategy_key == "ema":
+        return get_strategy("ema", use_trend_filter=filtered, min_confidence=0.0)
+    if strategy_key == "bollinger":
+        return get_strategy("bollinger", min_confidence=(0.20 if filtered else 0.0))
+    return get_strategy(strategy_key)  # rsi / macd unchanged
+
+
+def main():
+    ok = mt5.initialize(path=cfg.mt5_path, login=cfg.mt5_login,
+                        password=cfg.mt5_password, server=cfg.mt5_server)
+    if not ok:
+        print("MT5 init failed:", mt5.last_error()); return
+
+    date_to = dt.datetime.now()
+    date_from = date_to - dt.timedelta(days=120)
+    tf = TIMEFRAME_MAP["M15"]
+
+    tests = [
+        ("ema", "GBPUSD"), ("ema", "EURUSD"),
+        ("bollinger", "XAUUSD"), ("bollinger", "GBPUSD"),
+        ("rsi", "GBPUSD"), ("macd", "EURUSD"),
+    ]
+
+    print(f"\n{'='*78}\nA/B BACKTEST — M15, last 120 days, lot 0.10\n{'='*78}")
+    for key, symbol in tests:
+        si = mt5.symbol_info(symbol)
+        rates = mt5.copy_rates_range(symbol, tf, date_from, date_to)
+        if si is None or rates is None or len(rates) == 0:
+            print(f"\n{key:10} {symbol:8} — no data ({mt5.last_error()})"); continue
+        df = pd.DataFrame(rates)
+        df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        df.rename(columns={"tick_volume": "volume"}, inplace=True)
+        df = df[["time", "open", "high", "low", "close", "volume"]].copy()
+        point, digits = si.point, si.digits
+
+        old = run(df, make(key, "OLD"), symbol, point, digits, "OLD")
+        filt = run(df, make(key, "FILT"), symbol, point, digits, "FILT")
+        new = run(df, make(key, "NEW"), symbol, point, digits, "NEW")
+        print(f"\n{key.upper()} on {symbol}  ({len(df)} bars)")
+        for r in (old, filt, new):
+            print(f"  {r['mode']:4} trades={r['trades']:>4}  win%={r['win_rate']:>5}  "
+                  f"net=${r['net']:>9}  PF={str(r['pf']):>5}  maxDD=${r['max_dd']:>8}  "
+                  f"worst=${r['worst']:>8}")
+    mt5.shutdown()
+
+
+if __name__ == "__main__":
+    main()
