@@ -46,7 +46,8 @@ def session_for_hour(h):
     return "Asian/Off-hrs"
 
 
-def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5):
+def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5,
+        hour_window=None):
     pv = pip_value_per_lot(symbol, point)
     total = len(df)
     warmup = min(200, total // 3)
@@ -109,11 +110,14 @@ def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5):
         except Exception:
             sig = None
         if sig and sig.action in (SignalAction.BUY, SignalAction.SELL):
-            if mode == "NEW":
-                sl_pips, tp_pips = resolve_sl_tp_new(window, symbol, point)
-            else:
-                sl_pips, tp_pips = 50.0, 100.0
-            pending = (sig, sl_pips, tp_pips)
+            h = int(bar["time"].hour)
+            in_window = hour_window is None or (hour_window[0] <= h < hour_window[1])
+            if in_window:
+                if mode == "NEW":
+                    sl_pips, tp_pips = resolve_sl_tp_new(window, symbol, point)
+                else:
+                    sl_pips, tp_pips = 50.0, 100.0
+                pending = (sig, sl_pips, tp_pips)
 
     # metrics
     n = len(closed)
