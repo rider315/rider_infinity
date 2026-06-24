@@ -39,6 +39,13 @@ def resolve_sl_tp_new(window, symbol, point):
     return round(sl, 1), round(sl * cfg.min_rr_ratio, 1)
 
 
+def session_for_hour(h):
+    if 7 <= h < 12: return "London"
+    if 12 <= h < 16: return "London/NY overlap"
+    if 16 <= h < 21: return "New York"
+    return "Asian/Off-hrs"
+
+
 def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5):
     pv = pip_value_per_lot(symbol, point)
     total = len(df)
@@ -47,6 +54,7 @@ def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5):
     peak = equity
     max_dd = 0.0
     open_tr, closed, pending = [], [], None
+    trades = []  # (entry_hour, pnl)
 
     for i in range(warmup, total):
         bar = df.iloc[i]
@@ -62,7 +70,8 @@ def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5):
                 sl_p = round(ep + pips_to_price(sl_pips, symbol, point), digits)
                 tp_p = round(ep - pips_to_price(tp_pips, symbol, point), digits)
                 d = "SELL"
-            open_tr.append({"dir": d, "ep": ep, "sl": sl_p, "tp": tp_p})
+            open_tr.append({"dir": d, "ep": ep, "sl": sl_p, "tp": tp_p,
+                            "hour": int(bar["time"].hour)})
         pending = None
 
         # check SL/TP
@@ -88,6 +97,7 @@ def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5):
                 peak = max(peak, equity)
                 max_dd = max(max_dd, peak - equity)
                 closed.append(pnl)
+                trades.append((t["hour"], pnl))
             else:
                 still.append(t)
         open_tr = still
@@ -118,6 +128,7 @@ def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5):
         "pf": round(pf, 2) if pf != float("inf") else "inf",
         "max_dd": round(max_dd, 2),
         "worst": round(min(closed), 2) if closed else 0.0,
+        "trade_log": trades,
     }
 
 
@@ -147,6 +158,8 @@ def main():
     ]
 
     print(f"\n{'='*78}\nA/B BACKTEST — M15, last 120 days, lot 0.10\n{'='*78}")
+    session_agg = {}  # session -> [pnl] aggregated across all OLD runs
+    rsi_session = {}  # RSI-only session breakdown
     for key, symbol in tests:
         si = mt5.symbol_info(symbol)
         rates = mt5.copy_rates_range(symbol, tf, date_from, date_to)
@@ -166,6 +179,27 @@ def main():
             print(f"  {r['mode']:4} trades={r['trades']:>4}  win%={r['win_rate']:>5}  "
                   f"net=${r['net']:>9}  PF={str(r['pf']):>5}  maxDD=${r['max_dd']:>8}  "
                   f"worst=${r['worst']:>8}")
+        # accumulate session P&L from the recommended (OLD) config
+        for h, pnl in old["trade_log"]:
+            s = session_for_hour(h)
+            session_agg.setdefault(s, []).append(pnl)
+            if key == "rsi":
+                rsi_session.setdefault(s, []).append(pnl)
+
+    def show(title, agg):
+        print(f"\n{title}")
+        order = ["London", "London/NY overlap", "New York", "Asian/Off-hrs"]
+        for s in order:
+            v = agg.get(s)
+            if not v:
+                continue
+            wins = sum(1 for p in v if p > 0)
+            print(f"  {s:20} trades={len(v):>4}  win%={wins/len(v)*100:>5.1f}  "
+                  f"net=${sum(v):>9.2f}  avg=${sum(v)/len(v):>7.2f}")
+
+    print(f"\n{'='*78}\nTIME-OF-DAY (entry session, UTC) — recommended config across all tests\n{'='*78}")
+    show("ALL STRATEGIES combined:", session_agg)
+    show("RSI only (your edge):", rsi_session)
     mt5.shutdown()
 
 

@@ -720,12 +720,27 @@ class BacktestEngine:
             raise ValueError(f"Cannot get symbol info for {result.symbol}")
         point = sym_info.point
         digits = sym_info.digits
-        # Approximate pip value in account currency for P&L calculation
-        # For simplicity: 1 standard lot on most pairs ≈ $10/pip
-        # Adjust for lot size
-        pip_value_per_lot = 10.0  # USD per pip per standard lot
-        if "JPY" in result.symbol.upper():
-            pip_value_per_lot = 1000.0 * point * 100  # approximate
+        # Accurate pip value in account currency for 1.0 lot, derived from the
+        # broker's own tick data (same formula as RiskManager). This is correct
+        # for ALL instruments — majors, JPY pairs, crosses and metals (gold) —
+        # instead of the old hardcoded $10/pip which was only right for
+        # USD-quoted majors.
+        pip_points = 10 if digits in (3, 5) else 1
+        if sym_info.trade_tick_size and sym_info.trade_tick_size > 0:
+            pip_value_per_lot = (
+                sym_info.trade_tick_value * (pip_points * point) / sym_info.trade_tick_size
+            )
+        else:
+            pip_value_per_lot = 10.0  # fallback only if broker data missing
+        if pip_value_per_lot <= 0:
+            pip_value_per_lot = 10.0
+
+        # Spread cost (entry pays the spread). Historical spread isn't in candle
+        # data, so we charge the current spread on every trade — a realistic,
+        # slightly conservative cost that the old engine ignored entirely.
+        spread_pips = 0.0
+        if point > 0 and getattr(sym_info, "spread", 0):
+            spread_pips = sym_info.spread / pip_points  # spread is in points
 
         # ── 4. Walk bar-by-bar ───────────────────────────────────────
         WARMUP = min(200, total_bars // 3)  # indicator warm-up period
@@ -791,7 +806,7 @@ class BacktestEngine:
                     pnl_pips = self._calc_pnl_pips(
                         trade["direction"], trade["entry_price"],
                         exit_price, result.symbol, point,
-                    )
+                    ) - spread_pips  # charge the spread
                     pnl_money = pnl_pips * pip_value_per_lot * trade["lot_size"]
                     equity += pnl_money
 
@@ -854,7 +869,7 @@ class BacktestEngine:
                 pnl_pips = self._calc_pnl_pips(
                     trade["direction"], trade["entry_price"],
                     exit_price, result.symbol, point,
-                )
+                ) - spread_pips  # charge the spread
                 pnl_money = pnl_pips * pip_value_per_lot * trade["lot_size"]
                 equity += pnl_money
 

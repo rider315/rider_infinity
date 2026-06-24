@@ -327,6 +327,18 @@ class RiskManager:
         if weekday == 0 and now.hour < 0:
             return (False, "Market has not opened yet (Sunday evening).")
 
+        # 1b — Trading-hours window (UTC). Backtests show off-session hours
+        # produce mostly losing/noise trades; this gate restricts entries to
+        # the configured window (default 0..24 = no restriction).
+        start = getattr(self.config, "trade_hour_start", 0)
+        end = getattr(self.config, "trade_hour_end", 24)
+        if (start, end) != (0, 24):
+            h = now.hour
+            in_window = (start <= h < end) if start <= end else (h >= start or h < end)
+            if not in_window:
+                return (False, f"Outside trading hours ({h:02d}:00 UTC; "
+                               f"window {start:02d}-{end:02d}).")
+
         # 2 — Max open positions
         positions = mt5.positions_get()
         open_count = len(positions) if positions else 0

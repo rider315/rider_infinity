@@ -100,6 +100,44 @@ def _group_metrics(closed: List[Dict[str, Any]], key: str) -> Dict[str, Any]:
     return {k: _metrics(v) for k, v in sorted(groups.items())}
 
 
+def _session_for_hour(hour: int) -> str:
+    """Map a UTC hour to a forex trading session (where the action is)."""
+    if 7 <= hour < 12:
+        return "London"
+    if 12 <= hour < 16:
+        return "London/NY overlap"   # highest liquidity
+    if 16 <= hour < 21:
+        return "New York"
+    return "Asian/Off-hours"          # 21:00-07:00 UTC, thin liquidity
+
+
+def _hour_of(iso_time: str) -> Optional[int]:
+    try:
+        return datetime.fromisoformat(iso_time).hour
+    except (ValueError, TypeError):
+        return None
+
+
+def build_time_of_day(closed: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Break performance down by entry hour (UTC) and trading session.
+
+    Answers "at what time should the bot trade?" — surfaces the hours/sessions
+    where the edge actually lives so trading can be restricted to them.
+    """
+    by_hour: Dict[str, List[Dict[str, Any]]] = {}
+    by_session: Dict[str, List[Dict[str, Any]]] = {}
+    for t in closed:
+        hour = _hour_of(t.get("open_time", ""))
+        if hour is None:
+            continue
+        by_hour.setdefault(f"{hour:02d}:00", []).append(t)
+        by_session.setdefault(_session_for_hour(hour), []).append(t)
+    return {
+        "by_hour_utc": {k: _metrics(v) for k, v in sorted(by_hour.items())},
+        "by_session": {k: _metrics(v) for k, v in sorted(by_session.items())},
+    }
+
+
 def _slab_key(iso_time: str, slab: str) -> Optional[str]:
     """Bucket an ISO timestamp into a daily / weekly / monthly label."""
     try:
@@ -144,6 +182,7 @@ def build_summary(
         "open_trades": open_count,
         "overall": _metrics(closed),
         "by_time_slab": {k: _metrics(v) for k, v in sorted(slabs.items())},
+        "time_of_day": build_time_of_day(closed),
         "by_strategy": _group_metrics(closed, "strategy"),
         "by_symbol": _group_metrics(closed, "symbol"),
         "by_exit_reason": _group_metrics(closed, "exit_reason"),

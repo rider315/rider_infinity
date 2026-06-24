@@ -125,6 +125,14 @@ class Config:
             os.getenv("MAX_LOSS_PER_TRADE_PCT", "1.0")
         )
 
+        # --- Trading-hours window (UTC) ---------------------------------
+        # Only take new trades when the UTC hour is in [start, end).
+        # Defaults 0..24 = trade all hours (no change). Backtests show the
+        # Asian/off-hours session (≈21:00-07:00 UTC) is where most losing /
+        # noise trades happen — set 7..21 to trade only London + New York.
+        self.trade_hour_start: int = int(os.getenv("TRADE_HOUR_START", "0"))
+        self.trade_hour_end: int = int(os.getenv("TRADE_HOUR_END", "24"))
+
         # --- Bot settings ------------------------------------------------
         self.magic_number: int = int(os.getenv("MAGIC_NUMBER", "123456"))
         self.dry_run: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
