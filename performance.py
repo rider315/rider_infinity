@@ -38,6 +38,75 @@ def trades_to_csv(trades: List[Dict[str, Any]]) -> str:
     return buf.getvalue()
 
 
+def _to_perf_trade(run: Dict[str, Any], t: Dict[str, Any]) -> Dict[str, Any]:
+    """Map a stored backtest-trade row onto the live-trade schema used here."""
+    return {
+        "status": "CLOSED",
+        "profit": t.get("pnl_money"),
+        "pips": t.get("pnl_pips"),
+        "open_time": t.get("entry_time", ""),
+        "close_time": t.get("exit_time", ""),
+        "strategy": run.get("strategy_name", ""),
+        "symbol": run.get("symbol", ""),
+        "action": t.get("direction", ""),
+        "exit_reason": t.get("exit_reason", ""),
+        "confidence": t.get("signal_confidence"),
+        "entry_price": t.get("entry_price"),
+        "exit_price": t.get("exit_price"),
+        "sl": t.get("sl_price"),
+        "tp": t.get("tp_price"),
+        "lot": t.get("lot_size"),
+    }
+
+
+def build_backtest_summary(run: Dict[str, Any], trades: List[Dict[str, Any]],
+                           slab: str = "daily") -> Dict[str, Any]:
+    """Performance summary for a backtest run (overall + time-of-day + splits).
+
+    Reuses the same metrics engine as live trades so the analysis is identical,
+    and adds the run's own metadata (symbol, timeframe, date range).
+    """
+    mapped = [_to_perf_trade(run, t) for t in trades]
+    summary = build_summary(mapped, slab=slab)
+    summary["backtest"] = {
+        "run_id": run.get("run_id") or run.get("id"),
+        "strategy": run.get("strategy_name"),
+        "symbol": run.get("symbol"),
+        "timeframe": run.get("timeframe"),
+        "date_from": run.get("date_from"),
+        "date_to": run.get("date_to"),
+        "initial_balance": run.get("initial_balance"),
+        "lot_size": run.get("lot_size"),
+        "sl_pips": run.get("sl_pips"),
+        "tp_pips": run.get("tp_pips"),
+    }
+    return summary
+
+
+# Column order for the backtest CSV — entry/exit time first for easy analysis.
+BACKTEST_CSV_COLUMNS = [
+    "entry_time", "entry_hour_utc", "session", "exit_time", "direction",
+    "symbol", "entry_price", "exit_price", "sl_price", "tp_price", "lot_size",
+    "pnl_pips", "pnl_money", "exit_reason", "signal_confidence", "signal_reason",
+]
+
+
+def backtest_trades_to_csv(run: Dict[str, Any], trades: List[Dict[str, Any]]) -> str:
+    """Render backtest trades as CSV, with entry-hour + session columns added."""
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=BACKTEST_CSV_COLUMNS,
+                            extrasaction="ignore")
+    writer.writeheader()
+    for t in trades:
+        row = dict(t)
+        row["symbol"] = run.get("symbol", "")
+        hour = _hour_of(t.get("entry_time", ""))
+        row["entry_hour_utc"] = "" if hour is None else f"{hour:02d}:00"
+        row["session"] = "" if hour is None else _session_for_hour(hour)
+        writer.writerow(row)
+    return buf.getvalue()
+
+
 def _metrics(closed: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Compute core performance metrics for a list of CLOSED trades."""
     n = len(closed)

@@ -2032,6 +2032,11 @@ table.journal-table td {
         No backtest results yet. Configure and run a test above.
       </div>
       <div id="btResultsContent" style="display:none;">
+        <!-- Download for offline analysis -->
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem;">
+          <button class="btn" onclick="downloadBacktest('csv')" style="font-size:.78rem;">⬇ Trades CSV (with times)</button>
+          <button class="btn" onclick="downloadBacktest('json')" style="font-size:.78rem;">⬇ Summary JSON (time-of-day)</button>
+        </div>
         <!-- Metrics cards -->
         <div class="bt-metrics-grid" id="btMetrics"></div>
         <!-- Equity curve -->
@@ -4463,10 +4468,22 @@ table.journal-table td {
     } catch(err) { console.error('Poll error:', err); }
   }
 
+  function downloadBacktest(kind) {
+    const id = window._btCurrentRunId;
+    if (!id) { alert('Run a backtest first.'); return; }
+    if (kind === 'csv') {
+      window.location = '/api/backtest/' + id + '/trades.csv';
+    } else {
+      window.location = '/api/backtest/' + id + '/summary?download=1';
+    }
+  }
+  window.downloadBacktest = downloadBacktest;
+
   async function loadBacktestResults(runId) {
     try {
       const data = await api('/api/backtest/results/' + runId);
       if (!data) return;
+      window._btCurrentRunId = runId;
       document.getElementById('btResultsEmpty').style.display = 'none';
       document.getElementById('btResultsContent').style.display = 'block';
       renderBtMetrics(data);

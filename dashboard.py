@@ -916,6 +916,50 @@ def create_app() -> Flask:
             logger.error("GET /api/backtest/results error: %s", exc)
             return jsonify({"error": str(exc)}), 500
 
+    @app.route("/api/backtest/<run_id>/trades.csv", methods=["GET"])
+    def api_backtest_trades_csv(run_id: str):
+        """Download a backtest run's trades as CSV (with entry/exit time + session)."""
+        try:
+            engine = _get_backtest_engine()
+            run = engine.db.get_run(run_id)
+            if run is None:
+                return jsonify({"error": "Run not found"}), 404
+            trades = engine.db.get_trades(run_id)
+            csv_text = performance.backtest_trades_to_csv(run, trades)
+            fname = (f"backtest_{run.get('strategy_name','')}_{run.get('symbol','')}"
+                     f"_{run.get('timeframe','')}_{run_id}.csv")
+            return Response(
+                csv_text, mimetype="text/csv",
+                headers={"Content-Disposition": f"attachment; filename={fname}"},
+            )
+        except Exception as exc:
+            logger.error("GET /api/backtest/%s/trades.csv error: %s", run_id, exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/backtest/<run_id>/summary", methods=["GET"])
+    def api_backtest_summary(run_id: str):
+        """Backtest performance summary (overall + time-of-day + breakdowns)."""
+        try:
+            engine = _get_backtest_engine()
+            run = engine.db.get_run(run_id)
+            if run is None:
+                return jsonify({"error": "Run not found"}), 404
+            trades = engine.db.get_trades(run_id)
+            slab = request.args.get("slab", "daily")
+            summary = performance.build_backtest_summary(run, trades, slab=slab)
+            if request.args.get("download"):
+                import json as _json
+                fname = (f"backtest_summary_{run.get('strategy_name','')}_"
+                         f"{run.get('symbol','')}_{run_id}.json")
+                return Response(
+                    _json.dumps(summary, indent=2), mimetype="application/json",
+                    headers={"Content-Disposition": f"attachment; filename={fname}"},
+                )
+            return jsonify(summary)
+        except Exception as exc:
+            logger.error("GET /api/backtest/%s/summary error: %s", run_id, exc)
+            return jsonify({"error": str(exc)}), 500
+
     @app.route("/api/backtest/history", methods=["GET"])
     def api_backtest_history():
         """Return recent backtest run summaries."""
