@@ -549,23 +549,24 @@ table.journal-table td {
    ═══════════════════════════════════════════════════════════════════════ */
 .session-timeline {
   position: relative;
-  height: 54px;
+  height: 108px;
   background: rgba(255,255,255,.03);
   border-radius: var(--radius-sm);
   overflow: hidden;
   margin-bottom: .75rem;
 }
 .session-bar {
-  position: absolute; top: 8px; height: 18px;
+  position: absolute; height: 18px;
   border-radius: 4px;
   display: flex; align-items: center; justify-content: center;
   font-size: .6rem; font-weight: 700;
   text-transform: uppercase; letter-spacing: .04em;
   opacity: .75;
 }
-.session-bar.tokyo    { background: rgba(255,184,0,.2); color: var(--gold); }
-.session-bar.london   { background: rgba(0,255,136,.2); color: var(--green); top: 28px; }
-.session-bar.newyork  { background: rgba(168,85,247,.2); color: var(--purple); top: 8px; }
+.session-bar.sydney   { background: rgba(0,188,212,.2); color: #00BCD4; top: 6px; }
+.session-bar.tokyo    { background: rgba(255,184,0,.2); color: var(--gold); top: 30px; }
+.session-bar.london   { background: rgba(0,255,136,.2); color: var(--green); top: 54px; }
+.session-bar.newyork  { background: rgba(168,85,247,.2); color: var(--purple); top: 78px; }
 .session-bar.active-bar { opacity: 1; box-shadow: inset 0 0 0 1px currentColor; }
 
 .time-marker {
@@ -2581,10 +2582,12 @@ table.journal-table td {
   }
 
   function renderTimeline(activeSessions, isOverlap) {
+    // Sessions with UTC hours. Sydney wraps midnight (22-07) so it's split into two bars.
     const sessions = [
-      { name: 'Tokyo',    cls: 'tokyo',   start: 0,  end: 9 },
-      { name: 'New York', cls: 'newyork', start: 12, end: 21 },
-      { name: 'London',   cls: 'london',  start: 7,  end: 16 },
+      { name: 'Sydney',   cls: 'sydney',  segments: [{start: 22, end: 24}, {start: 0, end: 7}] },
+      { name: 'Tokyo',    cls: 'tokyo',   segments: [{start: 0,  end: 9}] },
+      { name: 'London',   cls: 'london',  segments: [{start: 7,  end: 16}] },
+      { name: 'New York', cls: 'newyork', segments: [{start: 12, end: 21}] },
     ];
     const now = new Date();
     const utcH = now.getUTCHours();
@@ -2593,11 +2596,15 @@ table.journal-table td {
 
     let html = '';
     sessions.forEach(s => {
-      const left = (s.start / 24) * 100;
-      const width = ((s.end - s.start) / 24) * 100;
       const isActive = activeSessions.includes(s.name);
-      html += `<div class="session-bar ${s.cls} ${isActive ? 'active-bar' : ''}" `
-            + `style="left:${left}%;width:${width}%;">${s.name}</div>`;
+      s.segments.forEach((seg, i) => {
+        const left = (seg.start / 24) * 100;
+        const width = ((seg.end - seg.start) / 24) * 100;
+        // Only show label on the widest segment
+        const label = (s.segments.length === 1 || i === 1) ? s.name : '';
+        html += `<div class="session-bar ${s.cls} ${isActive ? 'active-bar' : ''}" `
+              + `style="left:${left}%;width:${width}%;">${label}</div>`;
+      });
     });
     // Time marker
     const timeStr = String(utcH).padStart(2,'0') + ':' + String(utcM).padStart(2,'0');
