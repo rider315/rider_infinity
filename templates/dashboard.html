@@ -1754,12 +1754,12 @@ table.journal-table td {
     <div class="card anim-fade-in anim-delay-5">
       <div class="card-header">
         <div class="card-title"><span class="icon">🌐</span> Sessions</div>
-        <span style="font-size:.72rem;color:var(--text-muted)" id="utcClock">00:00 UTC</span>
+        <span style="font-size:.72rem;color:var(--text-muted)" id="utcClock">12:00 AM IST</span>
       </div>
       <div class="card-body" id="sessionBody">
         <div class="session-timeline" id="sessionTimeline"></div>
         <div class="hour-labels">
-          <span>00</span><span>03</span><span>06</span><span>09</span><span>12</span><span>15</span><span>18</span><span>21</span><span>24</span>
+          <span>12am</span><span>3am</span><span>6am</span><span>9am</span><span>12pm</span><span>3pm</span><span>6pm</span><span>9pm</span><span>12am</span>
         </div>
         <div style="margin-top:.75rem;">
           <div style="font-size:.7rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.35rem;">Best Pairs Now</div>
@@ -2582,17 +2582,17 @@ table.journal-table td {
   }
 
   function renderTimeline(activeSessions, isOverlap) {
-    // Sessions with UTC hours. Sydney wraps midnight (22-07) so it's split into two bars.
+    // Sessions in IST (UTC+5:30). New York wraps midnight in IST.
     const sessions = [
-      { name: 'Sydney',   cls: 'sydney',  segments: [{start: 22, end: 24}, {start: 0, end: 7}] },
-      { name: 'Tokyo',    cls: 'tokyo',   segments: [{start: 0,  end: 9}] },
-      { name: 'London',   cls: 'london',  segments: [{start: 7,  end: 16}] },
-      { name: 'New York', cls: 'newyork', segments: [{start: 12, end: 21}] },
+      { name: 'Sydney',   cls: 'sydney',  segments: [{start: 3.5,  end: 12.5}] },
+      { name: 'Tokyo',    cls: 'tokyo',   segments: [{start: 5.5,  end: 14.5}] },
+      { name: 'London',   cls: 'london',  segments: [{start: 12.5, end: 21.5}] },
+      { name: 'New York', cls: 'newyork', segments: [{start: 17.5, end: 24}, {start: 0, end: 2.5}] },
     ];
     const now = new Date();
-    const utcH = now.getUTCHours();
-    const utcM = now.getUTCMinutes();
-    const pct = ((utcH * 60 + utcM) / 1440) * 100;
+    const h = now.getHours();
+    const m = now.getMinutes();
+    const pct = ((h * 60 + m) / 1440) * 100;
 
     let html = '';
     sessions.forEach(s => {
@@ -2600,18 +2600,20 @@ table.journal-table td {
       s.segments.forEach((seg, i) => {
         const left = (seg.start / 24) * 100;
         const width = ((seg.end - seg.start) / 24) * 100;
-        // Only show label on the widest segment
-        const label = (s.segments.length === 1 || i === 1) ? s.name : '';
+        // Show label on the widest segment
+        const label = (s.segments.length === 1 || i === 0) ? s.name : '';
         html += `<div class="session-bar ${s.cls} ${isActive ? 'active-bar' : ''}" `
               + `style="left:${left}%;width:${width}%;">${label}</div>`;
       });
     });
-    // Time marker
-    const timeStr = String(utcH).padStart(2,'0') + ':' + String(utcM).padStart(2,'0');
-    html += `<div class="time-marker" style="left:${pct}%;" data-time="${timeStr} UTC"></div>`;
+    // Time marker in IST AM/PM
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const h12 = h % 12 || 12;
+    const timeStr = h12 + ':' + String(m).padStart(2,'0') + ' ' + ampm;
+    html += `<div class="time-marker" style="left:${pct}%;" data-time="${timeStr} IST"></div>`;
 
     dom.sessionTimeline.innerHTML = html;
-    dom.utcClock.textContent = timeStr + ' UTC';
+    dom.utcClock.textContent = timeStr + ' IST';
   }
 
   /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€─
