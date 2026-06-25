@@ -47,6 +47,11 @@ class MeanReversionStrategy(BaseStrategy):
         Lookback for the rolling mean / std z-score (default 20).
     z_threshold : float
         Displacement (in std-devs) required to fade (default 2.0).
+    z_max : float
+        Upper bound on displacement (default 3.5).  Beyond this, an extreme
+        z-score signals a *breakout / strong move in progress* rather than
+        noise to fade — these are the fat-tail losers.  Only fade when
+        ``z_threshold <= |z| <= z_max``.
     rsi_period : int
         Fast RSI lookback (default 2 — Connors style; we want *extreme*
         short-term displacement, not a trend reading).
@@ -90,6 +95,7 @@ class MeanReversionStrategy(BaseStrategy):
         self,
         z_period: int = 20,
         z_threshold: float = 2.0,
+        z_max: float = 3.5,
         rsi_period: int = 2,
         rsi_buy: float = 5.0,
         rsi_sell: float = 95.0,
@@ -107,8 +113,11 @@ class MeanReversionStrategy(BaseStrategy):
         super().__init__(sl_pips=sl_pips, tp_pips=tp_pips)
         if rsi_buy >= rsi_sell:
             raise ValueError("rsi_buy must be < rsi_sell.")
+        if z_max <= z_threshold:
+            raise ValueError(f"z_max ({z_max}) must be > z_threshold ({z_threshold}).")
         self.z_period = z_period
         self.z_threshold = z_threshold
+        self.z_max = z_max
         self.rsi_period = rsi_period
         self.rsi_buy = rsi_buy
         self.rsi_sell = rsi_sell
@@ -163,9 +172,11 @@ class MeanReversionStrategy(BaseStrategy):
             return self._hold(symbol)
 
         # ---- Raw fade direction ----
-        if z <= -self.z_threshold and rsi_v <= self.rsi_buy:
+        # Only fade *moderate* displacement: z_threshold <= |z| <= z_max.
+        # Beyond z_max the move is a breakout, not noise — skip it.
+        if -self.z_max <= z <= -self.z_threshold and rsi_v <= self.rsi_buy:
             action = SignalAction.BUY
-        elif z >= self.z_threshold and rsi_v >= self.rsi_sell:
+        elif self.z_threshold <= z <= self.z_max and rsi_v >= self.rsi_sell:
             action = SignalAction.SELL
         else:
             return self._hold(symbol)

@@ -137,6 +137,123 @@ PARAM_GRIDS: dict[str, dict[str, dict[str, list]]] = {
             "deep":   list(range(10, 120, 10)),
         },
     },
+    # Mean reversion: the geometry knobs behind "cutting winners short".
+    # sl_pips/tp_pips are swept here directly (reversion-appropriate ranges,
+    # tighter than the trend-tuned global SLTP_GRIDS) — so optimise WITHOUT
+    # the "optimise SL/TP" toggle for this strategy.
+    "meanrev": {
+        "z_threshold": {
+            "quick":  [2.0, 2.5],
+            "normal": [1.8, 2.0, 2.3, 2.6],
+            "deep":   [1.5, 1.8, 2.0, 2.2, 2.5, 2.8, 3.0],
+        },
+        "z_max": {
+            "quick":  [3.5],
+            "normal": [3.0, 3.5, 4.0],
+            "deep":   [2.8, 3.0, 3.5, 4.0, 5.0],
+        },
+        "max_hold_bars": {
+            "quick":  [16, 32],
+            "normal": [12, 16, 24, 32, 48],
+            "deep":   [8, 12, 16, 24, 32, 48, 64, 96],
+        },
+        "sl_pips": {
+            "quick":  [30, 50],
+            "normal": [20, 30, 40, 50],
+            "deep":   [15, 20, 25, 30, 40, 50, 70],
+        },
+        "tp_pips": {
+            "quick":  [15, 25],
+            "normal": [10, 15, 20, 25, 30],
+            "deep":   [8, 10, 12, 15, 20, 25, 30, 40],
+        },
+    },
+    # The four below follow the standard pattern: structural params here,
+    # SL/TP via the "optimise SL/TP" toggle (the trend-tuned global ranges
+    # suit trend/breakout/reversal, unlike mean reversion).
+    "donchian": {
+        "channel_period": {
+            "quick":  [34, 55, 89],
+            "normal": [21, 34, 55, 89, 144],
+            "deep":   list(range(20, 160, 8)),
+        },
+        "trend_period": {
+            "quick":  [50, 100, 200],
+            "normal": [50, 100, 150, 200],
+            "deep":   list(range(50, 260, 25)),
+        },
+        "min_adx": {
+            "quick":  [15, 20, 25],
+            "normal": [10, 15, 20, 25, 30],
+            "deep":   list(range(8, 35, 3)),
+        },
+    },
+    "orb": {
+        "or_minutes": {
+            "quick":  [15, 30, 45],
+            "normal": [15, 30, 45, 60],
+            "deep":   [15, 30, 45, 60, 90],
+        },
+        "buffer_atr": {
+            "quick":  [0.1, 0.25, 0.5],
+            "normal": [0.0, 0.1, 0.25, 0.4, 0.6],
+            "deep":   [x / 100 for x in range(0, 81, 10)],
+        },
+        "squeeze_factor": {
+            "quick":  [1.0, 1.5],
+            "normal": [0.8, 1.0, 1.2, 1.5, 2.0],
+            "deep":   [x / 10 for x in range(6, 26, 2)],
+        },
+    },
+    "sweep": {
+        "swing_lookback": {
+            "quick":  [30, 50, 80],
+            "normal": [20, 30, 50, 80, 100],
+            "deep":   list(range(20, 120, 10)),
+        },
+        "wick_ratio": {
+            "quick":  [0.5, 0.6, 0.7],
+            "normal": [0.45, 0.5, 0.55, 0.6, 0.7],
+            "deep":   [x / 100 for x in range(40, 81, 5)],
+        },
+        "range_mult": {
+            "quick":  [1.0, 1.3, 1.6],
+            "normal": [1.0, 1.2, 1.4, 1.6, 2.0],
+            "deep":   [x / 10 for x in range(10, 26, 2)],
+        },
+        "max_adx": {
+            "quick":  [20, 25, 30],
+            "normal": [15, 20, 25, 30],
+            "deep":   list(range(15, 36, 3)),
+        },
+    },
+    "regime": {
+        "fast_ema": {
+            "quick":  [10, 20],
+            "normal": [10, 15, 20, 30],
+            "deep":   list(range(8, 35, 4)),
+        },
+        "slow_ema": {
+            "quick":  [50, 100],
+            "normal": [40, 50, 75, 100],
+            "deep":   list(range(40, 160, 15)),
+        },
+        "trend_adx": {
+            "quick":  [22, 25, 28],
+            "normal": [20, 22, 25, 28, 30],
+            "deep":   list(range(20, 33, 2)),
+        },
+        "range_adx": {
+            "quick":  [15, 18],
+            "normal": [12, 15, 18, 20],
+            "deep":   list(range(10, 22, 2)),
+        },
+        "z_threshold": {
+            "quick":  [2.0, 2.5],
+            "normal": [1.8, 2.0, 2.3, 2.6],
+            "deep":   [1.5, 1.8, 2.0, 2.2, 2.5, 3.0],
+        },
+    },
 }
 
 # SL/TP optimisation ranges (applied on top of indicator params)
@@ -172,6 +289,20 @@ def _validate_grid(params: dict) -> bool:
 def _validate_dca(params: dict) -> bool:
     return params.get("dip_threshold_pct", 1.0) > 0 and params.get("reference_period", 50) >= 5
 
+def _validate_meanrev(params: dict) -> bool:
+    return (
+        params.get("z_threshold", 2.0) < params.get("z_max", 3.5)
+        and params.get("max_hold_bars", 16) >= 1
+        and params.get("sl_pips", 40) > 0
+        and params.get("tp_pips", 30) > 0
+    )
+
+def _validate_regime(params: dict) -> bool:
+    return (
+        params.get("fast_ema", 20) < params.get("slow_ema", 50)
+        and params.get("range_adx", 18) < params.get("trend_adx", 25)
+    )
+
 VALIDATORS = {
     "ema": _validate_ema,
     "rsi": _validate_rsi,
@@ -179,7 +310,11 @@ VALIDATORS = {
     "macd": _validate_macd,
     "grid": _validate_grid,
     "dca": _validate_dca,
+    "meanrev": _validate_meanrev,
+    "regime": _validate_regime,
 }
+# donchian / orb / sweep have no cross-parameter constraints → default
+# validator (always-valid) via VALIDATORS.get(name, lambda p: True).
 
 
 # =====================================================================
@@ -494,9 +629,12 @@ class StrategyOptimizer:
             param_names.append(name)
             param_values.append(values)
 
-        # Add SL/TP if requested
+        # Add SL/TP if requested (skip any the strategy grid already sweeps,
+        # e.g. meanrev defines its own reversion-appropriate sl/tp ranges).
         if optimize_sltp:
             for sltp_name, mode_dict in SLTP_GRIDS.items():
+                if sltp_name in param_names:
+                    continue
                 values = mode_dict.get(mode, mode_dict["normal"])
                 param_names.append(sltp_name)
                 param_values.append(values)
@@ -535,6 +673,9 @@ class StrategyOptimizer:
 
         # Instantiate strategy with these params
         strategy = get_strategy(strategy_name, sl_pips=sl_pips, tp_pips=tp_pips, **indicator_params)
+        # Honour an optional time-stop (e.g. mean reversion's max_hold_bars) so
+        # that parameter is actually swept rather than ignored.
+        max_hold_bars = int(getattr(strategy, "max_hold_bars", 0) or 0)
 
         total_bars = len(df)
         WARMUP = min(200, total_bars // 3)
@@ -570,6 +711,7 @@ class StrategyOptimizer:
                         "direction": direction,
                         "entry_price": entry_price,
                         "entry_time": bar_time,
+                        "entry_index": i,
                         "sl_price": sl_p, "tp_price": tp_p,
                     })
 
@@ -577,6 +719,8 @@ class StrategyOptimizer:
             still_open = []
             for trade in open_trades:
                 hit = self._check_sl_tp(trade, bar)
+                if not hit and max_hold_bars and (i - trade["entry_index"]) >= max_hold_bars:
+                    hit = (bar["close"], "TIME")
                 if hit:
                     exit_price, exit_reason = hit
                     pnl_pips = self._calc_pnl_pips(
