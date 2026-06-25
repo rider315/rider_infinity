@@ -258,6 +258,44 @@ PARAM_GRIDS: dict[str, dict[str, dict[str, list]]] = {
             "deep":   [2.0, 2.5],
         },
     },
+    # Micro-Trend Scalper. Like meanrev, sl_pips/tp_pips are swept HERE
+    # directly (scalping-tight ranges) — so optimise WITHOUT the global
+    # "optimise SL/TP" toggle. ``tp_pips`` is the small profit target and
+    # models the live Quick Exit (close at +N pips), so sweeping it finds the
+    # best scalp-exit distance. Grids kept coarse (≈8 / 48 / 162 combos) —
+    # the strategy recomputes EMA+ADX+ATR every bar, so each backtest is slow.
+    "scalper": {
+        "ema_fast": {
+            "quick":  [5],
+            "normal": [3, 5, 8],
+            "deep":   [3, 5, 8],
+        },
+        "ema_slow": {
+            "quick":  [20],
+            "normal": [20, 30],
+            "deep":   [15, 20, 30],
+        },
+        "adx_min": {
+            "quick":  [15, 22],
+            "normal": [18, 25],
+            "deep":   [12, 18, 25],
+        },
+        "breakout_lookback": {
+            "quick":  [6, 10],
+            "normal": [6, 10],
+            "deep":   [6, 12],
+        },
+        "sl_pips": {
+            "quick":  [8],
+            "normal": [8],
+            "deep":   [8],
+        },
+        "tp_pips": {
+            "quick":  [5, 10],
+            "normal": [5, 10],
+            "deep":   [4, 8, 12],
+        },
+    },
 }
 
 # SL/TP optimisation ranges (applied on top of indicator params)
@@ -307,6 +345,14 @@ def _validate_regime(params: dict) -> bool:
         and params.get("range_adx", 18) < params.get("trend_adx", 25)
     )
 
+def _validate_scalper(params: dict) -> bool:
+    return (
+        params.get("ema_fast", 5) < params.get("ema_slow", 20)
+        and params.get("breakout_lookback", 8) >= 2
+        and params.get("sl_pips", 8) > 0
+        and params.get("tp_pips", 12) > 0
+    )
+
 VALIDATORS = {
     "ema": _validate_ema,
     "rsi": _validate_rsi,
@@ -316,6 +362,7 @@ VALIDATORS = {
     "dca": _validate_dca,
     "meanrev": _validate_meanrev,
     "regime": _validate_regime,
+    "scalper": _validate_scalper,
 }
 # donchian / orb / sweep have no cross-parameter constraints → default
 # validator (always-valid) via VALIDATORS.get(name, lambda p: True).
