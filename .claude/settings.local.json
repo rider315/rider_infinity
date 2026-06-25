@@ -4,7 +4,13 @@
       "Bash(python -c ' *)",
       "Bash(python -m py_compile bot_history.py multi_bot.py dashboard.py performance.py)",
       "PowerShell(\\(Get-Location\\).Path)",
-      "Bash(graphify query *)"
+      "Bash(graphify query *)",
+      "Bash(python -m py_compile optimizer.py backtester.py)",
+      "Bash(graphify update *)",
+      "Bash(git add *)",
+      "Bash(git reset *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }
