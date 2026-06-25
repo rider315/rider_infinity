@@ -32,7 +32,7 @@ import logging
 import pandas as pd
 
 from .base import BaseStrategy, Signal, SignalAction, TriggerProximity
-from .indicators import adx, rsi, zscore
+from .indicators import adx, atr, ema, rsi, zscore
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,29 @@ class MeanReversionStrategy(BaseStrategy):
         UTC hours in which fading is permitted.  Defaults to the quiet
         windows (Asian session + London lunch) where reversion dominates.
         Pass ``None`` to disable the session gate.
+    use_trend_filter : bool
+        When True (default), block fades that lean *against* a clearly
+        sloping longer-term trend — i.e. don't buy oversold dips while the
+        trend is falling, and don't sell overbought spikes while it's rising.
+        This is the fix for the "buying dips in a downtrend" failure mode.
+    trend_period : int
+        EMA length defining the longer-term trend (default 200).
+    trend_slope_lookback : int
+        Bars over which the trend EMA's slope is measured (default 20).
+    trend_atr_mult : float
+        Slope dead-band in ATR units (default 0.5).  A trend counts as
+        "clearly sloping" only when the EMA moved more than this × ATR over
+        the lookback; flatter than that is treated as a range and both
+        directions are allowed.
+    max_hold_bars : int
+        Time-stop: maximum bars a position may stay open before the engine
+        force-closes it (default 16 ≈ 4h on M15).  A fade that hasn't
+        reverted quickly has lost its premise.  Read and enforced by the
+        backtester / order engine — see ``backtester.py``.
+    cooldown_bars : int
+        Minimum bars between successive entries on the same symbol (default
+        6).  Stops the strategy stacking 3-5 identical fades on consecutive
+        bars while the z-score stays beyond the threshold.
     sl_pips, tp_pips : float
         Stop / target.  Reversion runs tighter targets than stops by design
         (high hit-rate, small edge).
@@ -72,6 +95,12 @@ class MeanReversionStrategy(BaseStrategy):
         rsi_sell: float = 95.0,
         max_adx: float = 20.0,
         allowed_hours: set[int] | None = frozenset({0, 1, 2, 3, 4, 5, 6, 11, 12}),
+        use_trend_filter: bool = True,
+        trend_period: int = 200,
+        trend_slope_lookback: int = 20,
+        trend_atr_mult: float = 0.5,
+        max_hold_bars: int = 16,
+        cooldown_bars: int = 6,
         sl_pips: float = 40,
         tp_pips: float = 30,
     ) -> None:
@@ -85,6 +114,14 @@ class MeanReversionStrategy(BaseStrategy):
         self.rsi_sell = rsi_sell
         self.max_adx = max_adx
         self.allowed_hours = set(allowed_hours) if allowed_hours is not None else None
+        self.use_trend_filter = use_trend_filter
+        self.trend_period = trend_period
+        self.trend_slope_lookback = trend_slope_lookback
+        self.trend_atr_mult = trend_atr_mult
+        self.max_hold_bars = max_hold_bars
+        self.cooldown_bars = cooldown_bars
+        # Per-symbol timestamp of the last entry we emitted (cooldown state).
+        self._last_entry_time: dict[str, pd.Timestamp] = {}
 
     @property
     def name(self) -> str:
@@ -99,7 +136,10 @@ class MeanReversionStrategy(BaseStrategy):
             return True  # if time isn't a Timestamp, don't block
 
     def _min_candles(self) -> int:
-        return self.z_period + 16  # +ADX(14) warmup headroom
+        base = self.z_period + 16  # +ADX(14) warmup headroom
+        if self.use_trend_filter:
+            return max(base, self.trend_period + self.trend_slope_lookback)
+        return base
 
     def analyze(self, df: pd.DataFrame, symbol: str) -> Signal:
         if len(df) < self._min_candles():
@@ -111,9 +151,10 @@ class MeanReversionStrategy(BaseStrategy):
             logger.debug("[%s] %s — outside allowed session.", self.name, symbol)
             return self._hold(symbol)
 
-        z = zscore(df["close"], self.z_period).iloc[-1]
+        close = df["close"]
+        z = zscore(close, self.z_period).iloc[-1]
         adx_v = adx(df, 14).iloc[-1]
-        rsi_v = rsi(df["close"], self.rsi_period).iloc[-1]
+        rsi_v = rsi(close, self.rsi_period).iloc[-1]
 
         if any(pd.isna(v) for v in (z, adx_v, rsi_v)):
             return self._hold(symbol)
@@ -121,23 +162,55 @@ class MeanReversionStrategy(BaseStrategy):
             logger.debug("[%s] %s — trending (ADX=%.1f), no fade.", self.name, symbol, adx_v)
             return self._hold(symbol)
 
-        confidence = min(abs(z) / (self.z_threshold + 1.0), 1.0)
-
+        # ---- Raw fade direction ----
         if z <= -self.z_threshold and rsi_v <= self.rsi_buy:
-            reason = (f"Oversold fade: z={z:.2f}, RSI({self.rsi_period})={rsi_v:.0f}, "
-                      f"ADX={adx_v:.1f} (range)")
-            logger.info("[%s] %s — %s", self.name, symbol, reason)
-            return Signal(SignalAction.BUY, symbol, self.sl_pips, self.tp_pips,
-                          confidence, reason)
+            action = SignalAction.BUY
+        elif z >= self.z_threshold and rsi_v >= self.rsi_sell:
+            action = SignalAction.SELL
+        else:
+            return self._hold(symbol)
 
-        if z >= self.z_threshold and rsi_v >= self.rsi_sell:
-            reason = (f"Overbought fade: z={z:.2f}, RSI({self.rsi_period})={rsi_v:.0f}, "
-                      f"ADX={adx_v:.1f} (range)")
-            logger.info("[%s] %s — %s", self.name, symbol, reason)
-            return Signal(SignalAction.SELL, symbol, self.sl_pips, self.tp_pips,
-                          confidence, reason)
+        # ---- Higher-timeframe trend filter ----
+        # Block fades that lean against a clearly sloping trend. A flat trend
+        # (|EMA slope| < trend_atr_mult * ATR over the lookback) is treated as
+        # a range and allows both directions — exactly where fading works.
+        if self.use_trend_filter and len(df) >= self.trend_period + self.trend_slope_lookback:
+            trend = ema(close, self.trend_period)
+            slope = trend.iloc[-1] - trend.iloc[-1 - self.trend_slope_lookback]
+            atr_v = atr(df, 14).iloc[-1]
+            if not pd.isna(atr_v) and atr_v > 0:
+                band = self.trend_atr_mult * atr_v
+                if action == SignalAction.BUY and slope < -band:
+                    logger.debug("[%s] %s — BUY blocked: downtrend (slope=%.5f).",
+                                 self.name, symbol, slope)
+                    return self._hold(symbol)
+                if action == SignalAction.SELL and slope > band:
+                    logger.debug("[%s] %s — SELL blocked: uptrend (slope=%.5f).",
+                                 self.name, symbol, slope)
+                    return self._hold(symbol)
 
-        return self._hold(symbol)
+        # ---- Entry cooldown (suppress stacked, near-identical fades) ----
+        now = df["time"].iloc[-1] if "time" in df.columns else None
+        if now is not None and self.cooldown_bars > 0 and len(df) >= 2:
+            last = self._last_entry_time.get(symbol)
+            try:
+                bar_delta = df["time"].iloc[-1] - df["time"].iloc[-2]
+                if last is not None and (now - last) < self.cooldown_bars * bar_delta:
+                    logger.debug("[%s] %s — cooldown active, skipping.", self.name, symbol)
+                    return self._hold(symbol)
+            except (TypeError, AttributeError):
+                pass  # non-Timestamp index → skip cooldown
+
+        confidence = min(abs(z) / (self.z_threshold + 1.0), 1.0)
+        label = "Oversold" if action == SignalAction.BUY else "Overbought"
+        reason = (f"{label} fade: z={z:.2f}, RSI({self.rsi_period})={rsi_v:.0f}, "
+                  f"ADX={adx_v:.1f} (range)")
+
+        if now is not None:
+            self._last_entry_time[symbol] = now
+
+        logger.info("[%s] %s — %s", self.name, symbol, reason)
+        return Signal(action, symbol, self.sl_pips, self.tp_pips, confidence, reason)
 
     def get_proximity(self, df: pd.DataFrame, symbol: str) -> TriggerProximity:
         if len(df) < self._min_candles() or "close" not in df.columns:

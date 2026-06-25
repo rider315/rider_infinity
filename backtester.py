@@ -688,6 +688,11 @@ class BacktestEngine:
         result.sl_pips = config_sl
         result.tp_pips = config_tp
 
+        # Optional time-stop: a strategy may declare ``max_hold_bars`` to force
+        # positions closed after N bars (e.g. mean reversion that hasn't
+        # reverted). 0 / absent = no time-stop (unchanged behaviour).
+        max_hold_bars = int(getattr(strategy, "max_hold_bars", 0) or 0)
+
         # ── 2. Fetch historical data ─────────────────────────────────
         date_from = datetime.fromisoformat(result.date_from).replace(
             tzinfo=timezone.utc
@@ -790,6 +795,7 @@ class BacktestEngine:
                         "direction": direction,
                         "entry_price": entry_price,
                         "entry_time": bar_time,
+                        "entry_index": i,
                         "sl_price": sl_p,
                         "tp_price": tp_p,
                         "lot_size": result.lot_size,
@@ -801,6 +807,11 @@ class BacktestEngine:
             still_open = []
             for trade in open_trades:
                 hit = self._check_sl_tp(trade, bar, point, result.symbol)
+                # Time-stop: if neither SL nor TP was touched and the position
+                # has been open at least max_hold_bars, close it at this bar's
+                # close (SL/TP take precedence intrabar).
+                if not hit and max_hold_bars and (i - trade["entry_index"]) >= max_hold_bars:
+                    hit = (bar["close"], "TIME")
                 if hit:
                     exit_price, exit_reason = hit
                     pnl_pips = self._calc_pnl_pips(
