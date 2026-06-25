@@ -25,6 +25,7 @@ from .mean_reversion_strategy import MeanReversionStrategy
 from .opening_range_strategy import OpeningRangeBreakoutStrategy
 from .liquidity_sweep_strategy import LiquiditySweepStrategy
 from .regime_switch_strategy import RegimeSwitchStrategy
+from .scalper_strategy import ScalperStrategy
 
 STRATEGY_REGISTRY: dict[str, tuple[type, str]] = {
     "ema": (EMACrossoverStrategy, "EMA Crossover — Trend Following"),
@@ -40,6 +41,7 @@ STRATEGY_REGISTRY: dict[str, tuple[type, str]] = {
     "orb": (OpeningRangeBreakoutStrategy, "Opening Range Breakout — Session Volatility"),
     "sweep": (LiquiditySweepStrategy, "Liquidity Sweep — Stop-Run Reversal"),
     "regime": (RegimeSwitchStrategy, "Regime Switch — Adaptive Trend/Range"),
+    "scalper": (ScalperStrategy, "Micro-Trend Scalper — Fast Breakout (pair with Quick Exit)"),
 }
 
 

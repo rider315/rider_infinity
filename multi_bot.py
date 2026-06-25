@@ -41,6 +41,11 @@ from strategies.base import SignalAction
 from utils import compute_atr, pips_to_price, price_to_pips, save_trade_to_journal, setup_logger
 from bot_history import BotHistoryDB
 
+# How often (seconds) a Quick-Exit-armed bot re-checks its open position's
+# floating profit while in a trade. Small enough to bank a few-pip move,
+# large enough not to hammer the MT5 terminal.
+QUICK_EXIT_POLL_SEC = 3
+
 
 # ======================================================================
 #  Bot Instance Status
@@ -70,6 +75,13 @@ class BotInstance:
     lot_mode: str = "fixed"          # "fixed" | "auto"
     dry_run: bool = True
     strategy_params: dict = field(default_factory=dict)  # optimized indicator params
+
+    # Quick Exit — independent, per-bot scalp-exit feature (UI toggle).
+    # When enabled, the bot polls its open position frequently and closes it
+    # the moment floating profit reaches ``quick_exit_pips`` pips. Lets any
+    # strategy "thoda profit hote hi" bank it and free the slot for the next trade.
+    quick_exit_enabled: bool = False
+    quick_exit_pips: float = 5.0
 
     # Runtime state (not set by user)
     status: BotStatus = field(default=BotStatus.IDLE)
@@ -144,6 +156,8 @@ class MultiBotManager:
         lot_mode: str = "fixed",
         dry_run: bool = True,
         strategy_params: dict | None = None,
+        quick_exit_enabled: bool = False,
+        quick_exit_pips: float = 5.0,
     ) -> BotInstance:
         """Create and register a new bot instance (does NOT start it)."""
         with self._lock:
@@ -156,6 +170,8 @@ class MultiBotManager:
                 lot_mode=lot_mode,
                 dry_run=dry_run,
                 strategy_params=strategy_params or {},
+                quick_exit_enabled=bool(quick_exit_enabled),
+                quick_exit_pips=float(quick_exit_pips),
             )
             self._bots[self._next_id] = bot
             self._next_id += 1
@@ -300,6 +316,8 @@ class MultiBotManager:
                     "lot_mode": bot.lot_mode,
                     "dry_run": bot.dry_run,
                     "strategy_params": bot.strategy_params,
+                    "quick_exit_enabled": bot.quick_exit_enabled,
+                    "quick_exit_pips": bot.quick_exit_pips,
                     "was_running": bot.status in (
                         BotStatus.RUNNING, BotStatus.WAITING,
                     ),
@@ -349,6 +367,8 @@ class MultiBotManager:
                     lot_mode=cfg.get("lot_mode", "fixed"),
                     dry_run=cfg.get("dry_run", True),
                     strategy_params=cfg.get("strategy_params", {}),
+                    quick_exit_enabled=cfg.get("quick_exit_enabled", False),
+                    quick_exit_pips=cfg.get("quick_exit_pips", 5.0),
                 )
                 restored += 1
 
@@ -484,9 +504,17 @@ class MultiBotManager:
                 # -- Sync position state (detect externally closed trades) --
                 self._sync_position_state(bot, logger)
 
-                # -- Sleep until next candle --
-                sleep_sec = self._seconds_until_next_candle(bot.timeframe_key)
-                sleep_sec = max(5, sleep_sec)
+                # -- Quick Exit: bank small profit immediately (if enabled) --
+                self._apply_quick_exit(bot, logger)
+
+                # -- Sleep --
+                # When Quick Exit is armed and a position is open, poll fast so
+                # we can close near the target instead of waiting a whole candle.
+                if (bot.quick_exit_enabled and bot.active_tickets
+                        and not bot.dry_run):
+                    sleep_sec = QUICK_EXIT_POLL_SEC
+                else:
+                    sleep_sec = max(5, self._seconds_until_next_candle(bot.timeframe_key))
                 bot._stop_event.wait(timeout=sleep_sec)
 
         except Exception as exc:
@@ -760,6 +788,57 @@ class MultiBotManager:
             logger.debug(
                 "Bot#%d position sync check failed: %s", bot.bot_id, exc,
             )
+
+    def _apply_quick_exit(self, bot: BotInstance, logger: logging.Logger) -> None:
+        """Close any open position the instant it reaches the quick-profit target.
+
+        Independent of the strategy: works on *any* bot once toggled on. The
+        floating profit is measured in pips from fill price to current price so
+        it is lot-size independent and predictable. The actual close happens via
+        the live order manager; ``_sync_position_state`` then reconciles state
+        and records the closed trade on the next loop tick.
+        """
+        if not bot.quick_exit_enabled or bot.dry_run:
+            return
+        if not bot.active_positions:
+            return
+
+        target = float(bot.quick_exit_pips)
+        if target <= 0:
+            return
+
+        sym_info = self.market_data.get_symbol_info(bot.symbol)
+        if sym_info is None or sym_info.get("point", 0) <= 0:
+            return
+        point = sym_info["point"]
+
+        for pos in list(bot.active_positions):
+            entry = pos.get("entry", 0.0)
+            current = pos.get("price_current", 0.0)
+            if not entry or not current:
+                continue
+
+            # Profit in price units → pips (BUY closes at bid, SELL at ask;
+            # price_current already reflects the closeable side per position).
+            if pos.get("type") == "BUY":
+                profit_price = current - entry
+            else:
+                profit_price = entry - current
+            profit_pips = price_to_pips(profit_price, bot.symbol, point)
+
+            if profit_pips >= target:
+                ticket = pos.get("ticket")
+                logger.info(
+                    "Bot#%d Quick Exit — closing #%s at +%.1f pips "
+                    "(target %.1f).",
+                    bot.bot_id, ticket, profit_pips, target,
+                )
+                ok = self.order_mgr.close_position(ticket)
+                if not ok:
+                    logger.warning(
+                        "Bot#%d Quick Exit close failed for #%s — will retry.",
+                        bot.bot_id, ticket,
+                    )
 
     # Map MT5 deal reason codes to human-readable exit reasons.
     _DEAL_REASON_MAP = {

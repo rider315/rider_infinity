@@ -1562,6 +1562,16 @@ table.journal-table td {
             </div>
 
             <div class="form-group" style="justify-content:flex-end;">
+              <label class="form-label tip" data-tip="Close the trade the moment it reaches this many pips of profit. Great with the Scalper strategy for quick, frequent wins.">⚡ Quick Exit</label>
+              <label class="toggle-wrap" style="margin-bottom:.3rem;">
+                <input type="checkbox" id="fQuickExit" class="toggle-input">
+                <span class="toggle-track"></span>
+                <span class="toggle-label" id="fQuickExitLabel">OFF</span>
+              </label>
+              <input id="fQuickExitPips" type="number" class="form-control" value="5" min="0.1" step="0.1" title="Profit target in pips" style="width:90px;">
+            </div>
+
+            <div class="form-group" style="justify-content:flex-end;">
               <label class="form-label">&nbsp;</label>
               <button type="submit" class="btn btn-primary" id="btnAddBot">
                 ⚡ Add &amp; Start Bot
@@ -2419,6 +2429,9 @@ table.journal-table td {
     fAutoLot:      $('#fAutoLot'),
     fDryRun:       $('#fDryRun'),
     fDryRunLabel:  $('#fDryRunLabel'),
+    fQuickExit:    $('#fQuickExit'),
+    fQuickExitLabel: $('#fQuickExitLabel'),
+    fQuickExitPips:  $('#fQuickExitPips'),
     toastCont:     $('#toastContainer'),
     modal:         $('#modal'),
     modalTitle:    $('#modalTitle'),
@@ -2883,6 +2896,7 @@ table.journal-table td {
               : `<button class="btn btn-ghost btn-icon tip" data-tip="Start" onclick="APP.startBot(${b.bot_id})">▶</button>`
             }
             <button class="btn btn-ghost btn-icon tip" data-tip="Toggle Dry/Live" onclick="APP.toggleDry(${b.bot_id}, ${b.dry_run})">🔄</button>
+            <button class="btn btn-ghost btn-icon tip" data-tip="Quick Exit: ${b.quick_exit_enabled ? 'ON @ ' + (b.quick_exit_pips ?? 5) + ' pips' : 'OFF'} — click to toggle" onclick="APP.toggleQuickExit(${b.bot_id}, ${!!b.quick_exit_enabled}, ${b.quick_exit_pips ?? 5})" style="color:${b.quick_exit_enabled ? 'var(--gold)' : 'var(--text-muted)'};">⚡</button>
             <button class="btn btn-ghost btn-icon tip" data-tip="Remove" onclick="APP.removeBot(${b.bot_id})" style="color:var(--red);">🗑</button>
           </div>
         </td>
@@ -3057,6 +3071,12 @@ table.journal-table td {
   /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€─
      FORM: DRY RUN TOGGLE LABEL
      â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€─ */
+  dom.fQuickExit.addEventListener('change', () => {
+    const on = dom.fQuickExit.checked;
+    dom.fQuickExitLabel.textContent = on ? 'ON' : 'OFF';
+    dom.fQuickExitLabel.style.color = on ? 'var(--gold)' : '';
+    dom.fQuickExitPips.style.opacity = on ? '' : '.4';
+  });
   dom.fDryRun.addEventListener('change', () => {
     dom.fDryRunLabel.textContent = dom.fDryRun.checked ? 'DRY RUN' : '⚠ LIVE';
     dom.fDryRunLabel.style.color = dom.fDryRun.checked ? '' : 'var(--red)';
@@ -3155,6 +3175,8 @@ table.journal-table td {
       lot_size:  parseFloat(dom.fLot.value) || 0.01,
       lot_mode:  dom.fAutoLot.checked ? 'auto' : 'fixed',
       dry_run:   dryRun,
+      quick_exit_enabled: dom.fQuickExit.checked,
+      quick_exit_pips:    parseFloat(dom.fQuickExitPips.value) || 5,
     };
 
     // Include optimized strategy params if user checked the box
@@ -3207,6 +3229,16 @@ table.journal-table td {
       try {
         await api(`/api/bots/${id}/toggle-dry-run`, { method: 'POST' });
         toast(`Bot #${id} mode toggled`, currentlyDry ? 'warning' : 'success');
+        fetchBots();
+      } catch (err) { toast(`Failed: ${err.message}`, 'error'); }
+    },
+
+    async toggleQuickExit(id, currentlyOn, currentPips) {
+      // Flip on/off using the bot's stored pip target (set on the Add-Bot form).
+      const body = { enabled: !currentlyOn, pips: currentPips || 5 };
+      try {
+        const res = await api(`/api/bots/${id}/quick-exit`, { method: 'POST', body: JSON.stringify(body) });
+        toast(res.message || `Bot #${id} Quick Exit updated`, body.enabled ? 'success' : 'warning');
         fetchBots();
       } catch (err) { toast(`Failed: ${err.message}`, 'error'); }
     },

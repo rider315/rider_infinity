@@ -273,6 +273,13 @@ def create_app() -> Flask:
             lot_mode = data.get("lot_mode", "fixed")
             dry_run = bool(data.get("dry_run", True))
             strategy_params = data.get("strategy_params", {})
+            quick_exit_enabled = bool(data.get("quick_exit_enabled", False))
+            try:
+                quick_exit_pips = float(data.get("quick_exit_pips", 5.0))
+            except (TypeError, ValueError):
+                quick_exit_pips = 5.0
+            if quick_exit_pips <= 0:
+                quick_exit_pips = 5.0
 
             # Validate timeframe
             if timeframe not in TIMEFRAME_MAP:
@@ -289,6 +296,8 @@ def create_app() -> Flask:
                 lot_mode=lot_mode,
                 dry_run=dry_run,
                 strategy_params=strategy_params,
+                quick_exit_enabled=quick_exit_enabled,
+                quick_exit_pips=quick_exit_pips,
             )
 
             # Auto-start the bot
@@ -365,6 +374,50 @@ def create_app() -> Flask:
             })
         except Exception as exc:
             logger.error("POST /api/bots/%d/toggle-dry-run error: %s", bot_id, exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/bots/<int:bot_id>/quick-exit", methods=["POST"])
+    def api_bot_quick_exit(bot_id: int):
+        """Enable/disable Quick Exit (scalp exit) and set its pip target.
+
+        Safe to change while the bot is running — the trading loop reads the
+        flag each tick.  Body (all optional)::
+            { "enabled": true, "pips": 5 }
+        """
+        try:
+            bot = _bot_mgr.get_bot(bot_id)
+            if bot is None:
+                return jsonify({"error": f"Bot #{bot_id} not found"}), 404
+
+            data = request.get_json(force=True, silent=True) or {}
+
+            if "enabled" in data:
+                bot.quick_exit_enabled = bool(data["enabled"])
+            else:
+                # No explicit value → treat as a toggle.
+                bot.quick_exit_enabled = not bot.quick_exit_enabled
+
+            if "pips" in data:
+                try:
+                    pips = float(data["pips"])
+                    if pips > 0:
+                        bot.quick_exit_pips = pips
+                except (TypeError, ValueError):
+                    return jsonify({"error": "pips must be a positive number"}), 400
+
+            _bot_mgr._save_bots()
+            state = "ON" if bot.quick_exit_enabled else "OFF"
+            logger.info(
+                "Bot #%d Quick Exit %s (target %.1f pips)",
+                bot_id, state, bot.quick_exit_pips,
+            )
+            return jsonify({
+                "message": f"Bot #{bot_id} Quick Exit {state} "
+                           f"@ {bot.quick_exit_pips:g} pips",
+                **_serialise_bot(bot),
+            })
+        except Exception as exc:
+            logger.error("POST /api/bots/%d/quick-exit error: %s", bot_id, exc)
             return jsonify({"error": str(exc)}), 500
 
     @app.route("/api/bots/<int:bot_id>", methods=["DELETE"])
@@ -1393,6 +1446,8 @@ def _serialise_bot(bot: BotInstance) -> dict[str, Any]:
         "last_ticket": bot.last_ticket,
         "active_positions": bot.active_positions,
         "blocked_reason": bot.blocked_reason,
+        "quick_exit_enabled": bot.quick_exit_enabled,
+        "quick_exit_pips": bot.quick_exit_pips,
     }
 
 
