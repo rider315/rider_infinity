@@ -141,31 +141,35 @@ PARAM_GRIDS: dict[str, dict[str, dict[str, list]]] = {
     # sl_pips/tp_pips are swept here directly (reversion-appropriate ranges,
     # tighter than the trend-tuned global SLTP_GRIDS) — so optimise WITHOUT
     # the "optimise SL/TP" toggle for this strategy.
+    # Grids are kept deliberately COARSE: these strategies recompute several
+    # indicators per bar, so each backtest is slow (~tens of seconds on 6mo
+    # M15). Quick ≈ 8 combos, Normal ≈ 30-40, Deep ≈ 100-160. Prefer a coarse
+    # sweep + walk-forward over a dense in-sample grid (which just overfits).
     "meanrev": {
         "z_threshold": {
             "quick":  [2.0, 2.5],
-            "normal": [1.8, 2.0, 2.3, 2.6],
-            "deep":   [1.5, 1.8, 2.0, 2.2, 2.5, 2.8, 3.0],
+            "normal": [2.0, 2.5],
+            "deep":   [1.8, 2.0, 2.3],
         },
         "z_max": {
             "quick":  [3.5],
-            "normal": [3.0, 3.5, 4.0],
-            "deep":   [2.8, 3.0, 3.5, 4.0, 5.0],
+            "normal": [3.5],
+            "deep":   [3.0, 3.5],
         },
         "max_hold_bars": {
             "quick":  [16, 32],
-            "normal": [12, 16, 24, 32, 48],
-            "deep":   [8, 12, 16, 24, 32, 48, 64, 96],
+            "normal": [16, 24, 32],
+            "deep":   [16, 24, 32, 48],
         },
         "sl_pips": {
-            "quick":  [30, 50],
-            "normal": [20, 30, 40, 50],
-            "deep":   [15, 20, 25, 30, 40, 50, 70],
+            "quick":  [40],
+            "normal": [30, 50],
+            "deep":   [30, 50],
         },
         "tp_pips": {
             "quick":  [15, 25],
-            "normal": [10, 15, 20, 25, 30],
-            "deep":   [8, 10, 12, 15, 20, 25, 30, 40],
+            "normal": [15, 25, 35],
+            "deep":   [12, 18, 25],
         },
     },
     # The four below follow the standard pattern: structural params here,
@@ -173,85 +177,85 @@ PARAM_GRIDS: dict[str, dict[str, dict[str, list]]] = {
     # suit trend/breakout/reversal, unlike mean reversion).
     "donchian": {
         "channel_period": {
-            "quick":  [34, 55, 89],
-            "normal": [21, 34, 55, 89, 144],
-            "deep":   list(range(20, 160, 8)),
+            "quick":  [34, 55],
+            "normal": [34, 55, 89],
+            "deep":   [21, 34, 55, 89, 144],
         },
         "trend_period": {
-            "quick":  [50, 100, 200],
-            "normal": [50, 100, 150, 200],
-            "deep":   list(range(50, 260, 25)),
+            "quick":  [100, 200],
+            "normal": [50, 100, 200],
+            "deep":   [50, 100, 150, 200],
         },
         "min_adx": {
-            "quick":  [15, 20, 25],
-            "normal": [10, 15, 20, 25, 30],
-            "deep":   list(range(8, 35, 3)),
+            "quick":  [15, 25],
+            "normal": [15, 20, 25],
+            "deep":   [12, 18, 25],
         },
     },
     "orb": {
         "or_minutes": {
-            "quick":  [15, 30, 45],
-            "normal": [15, 30, 45, 60],
-            "deep":   [15, 30, 45, 60, 90],
+            "quick":  [15, 30],
+            "normal": [15, 30, 45],
+            "deep":   [15, 30, 45, 60],
         },
         "buffer_atr": {
-            "quick":  [0.1, 0.25, 0.5],
-            "normal": [0.0, 0.1, 0.25, 0.4, 0.6],
-            "deep":   [x / 100 for x in range(0, 81, 10)],
+            "quick":  [0.1, 0.25],
+            "normal": [0.1, 0.25, 0.4],
+            "deep":   [0.0, 0.1, 0.25, 0.4, 0.6],
         },
         "squeeze_factor": {
             "quick":  [1.0, 1.5],
-            "normal": [0.8, 1.0, 1.2, 1.5, 2.0],
-            "deep":   [x / 10 for x in range(6, 26, 2)],
+            "normal": [1.0, 1.5, 2.0],
+            "deep":   [0.8, 1.0, 1.5, 2.0],
         },
     },
     "sweep": {
         "swing_lookback": {
-            "quick":  [30, 50, 80],
-            "normal": [20, 30, 50, 80, 100],
-            "deep":   list(range(20, 120, 10)),
+            "quick":  [30, 50],
+            "normal": [30, 50, 80],
+            "deep":   [20, 30, 50, 80, 100],
         },
         "wick_ratio": {
-            "quick":  [0.5, 0.6, 0.7],
-            "normal": [0.45, 0.5, 0.55, 0.6, 0.7],
-            "deep":   [x / 100 for x in range(40, 81, 5)],
+            "quick":  [0.5, 0.6],
+            "normal": [0.5, 0.6],
+            "deep":   [0.45, 0.55, 0.65],
         },
         "range_mult": {
-            "quick":  [1.0, 1.3, 1.6],
-            "normal": [1.0, 1.2, 1.4, 1.6, 2.0],
-            "deep":   [x / 10 for x in range(10, 26, 2)],
+            "quick":  [1.3],
+            "normal": [1.2, 1.5],
+            "deep":   [1.2, 1.5, 2.0],
         },
         "max_adx": {
-            "quick":  [20, 25, 30],
-            "normal": [15, 20, 25, 30],
-            "deep":   list(range(15, 36, 3)),
+            "quick":  [20, 25],
+            "normal": [20, 25, 30],
+            "deep":   [20, 25, 30],
         },
     },
     "regime": {
         "fast_ema": {
             "quick":  [10, 20],
-            "normal": [10, 15, 20, 30],
-            "deep":   list(range(8, 35, 4)),
+            "normal": [10, 20],
+            "deep":   [10, 15, 20],
         },
         "slow_ema": {
             "quick":  [50, 100],
-            "normal": [40, 50, 75, 100],
-            "deep":   list(range(40, 160, 15)),
+            "normal": [50, 100],
+            "deep":   [40, 75, 100],
         },
         "trend_adx": {
-            "quick":  [22, 25, 28],
-            "normal": [20, 22, 25, 28, 30],
-            "deep":   list(range(20, 33, 2)),
+            "quick":  [25],
+            "normal": [22, 28],
+            "deep":   [22, 25, 28],
         },
         "range_adx": {
-            "quick":  [15, 18],
-            "normal": [12, 15, 18, 20],
-            "deep":   list(range(10, 22, 2)),
+            "quick":  [18],
+            "normal": [15, 18],
+            "deep":   [12, 15, 18],
         },
         "z_threshold": {
             "quick":  [2.0, 2.5],
-            "normal": [1.8, 2.0, 2.3, 2.6],
-            "deep":   [1.5, 1.8, 2.0, 2.2, 2.5, 3.0],
+            "normal": [2.0, 2.5],
+            "deep":   [2.0, 2.5],
         },
     },
 }

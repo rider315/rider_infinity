@@ -339,13 +339,17 @@ class RiskManager:
                 return (False, f"Outside trading hours ({h:02d}:00 UTC; "
                                f"window {start:02d}-{end:02d}).")
 
-        # 2 — Max open positions
+        # 2 — Max open positions (account-wide PORTFOLIO ceiling across all
+        # bots combined — a safety cap, not the per-bot limit). If this trips
+        # during normal fleet operation, raise MAX_OPEN_POSITIONS to >= number
+        # of bots; per-bot independence is enforced separately by the caller.
         positions = mt5.positions_get()
         open_count = len(positions) if positions else 0
         if open_count >= self.config.max_open_positions:
             return (
                 False,
-                f"Max open positions reached ({open_count}/{self.config.max_open_positions}).",
+                f"Portfolio position limit reached "
+                f"({open_count}/{self.config.max_open_positions} open account-wide).",
             )
 
         # 3 — Daily drawdown

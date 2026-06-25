@@ -46,6 +46,7 @@ class MarketDataFeed:
         symbol: str,
         timeframe: int,
         count: int = 200,
+        drop_forming: bool = False,
     ) -> Optional[pd.DataFrame]:
         """Retrieve historical OHLCV candles for a symbol.
 
@@ -53,6 +54,13 @@ class MarketDataFeed:
             symbol:    Instrument name (e.g. ``"EURUSD"``).
             timeframe: MT5 timeframe constant (e.g. ``mt5.TIMEFRAME_M5``).
             count:     Number of bars to fetch (default ``200``).
+            drop_forming: When ``True``, drop the last (still-forming, not yet
+                closed) candle so callers evaluate signals on CLOSED candles
+                only. MT5's ``copy_rates_from_pos`` returns the in-progress
+                candle at position 0, whose values mutate tick-by-tick; using
+                it makes cross/threshold logic (e.g. RSI reversals) flicker and
+                miss triggers. Live trading loops should pass ``True``.
+                Defaults to ``False`` for backtesting / analysis callers.
 
         Returns:
             A ``pandas.DataFrame`` with columns
@@ -60,7 +68,10 @@ class MarketDataFeed:
             timezone-aware UTC ``datetime``.  Returns ``None`` if the
             request fails.
         """
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+        # When dropping the forming candle, fetch one extra bar so the caller
+        # still receives ``count`` *closed* candles.
+        fetch_count = count + 1 if drop_forming else count
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, fetch_count)
 
         if rates is None or len(rates) == 0:
             error_code, error_msg = mt5.last_error()
@@ -84,6 +95,10 @@ class MarketDataFeed:
 
         # Convert UNIX timestamps → UTC datetimes.
         df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+
+        # Drop the still-forming (last) candle so signals use closed bars only.
+        if drop_forming and len(df) > 1:
+            df = df.iloc[:-1].reset_index(drop=True)
 
         logger.debug(
             "Fetched %d candles for %s (tf=%s).", len(df), symbol, timeframe

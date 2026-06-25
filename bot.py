@@ -635,8 +635,11 @@ class RiderInfinityBot:
                         time.sleep(30)
                         continue
 
-                # -- Fetch candles --
-                df = self.market_data.get_candles(self.symbol, mt5_tf, count=500)
+                # -- Fetch candles (closed bars only; drop the forming one so
+                # signal triggers don't flicker on the in-progress candle) --
+                df = self.market_data.get_candles(
+                    self.symbol, mt5_tf, count=500, drop_forming=True
+                )
                 if df is None or df.empty:
                     self.logger.warning("No candle data for %s.", self.symbol)
                     time.sleep(10)

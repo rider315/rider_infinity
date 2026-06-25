@@ -430,7 +430,11 @@ class MultiBotManager:
                         continue
 
                 # -- Fetch candles --
-                df = self.market_data.get_candles(bot.symbol, mt5_tf, count=500)
+                # drop_forming=True → evaluate on CLOSED candles only so RSI
+                # reversal/cross triggers don't flicker on the in-progress bar.
+                df = self.market_data.get_candles(
+                    bot.symbol, mt5_tf, count=500, drop_forming=True
+                )
                 if df is None or df.empty:
                     logger.warning("No data for %s — retrying.", bot.symbol)
                     bot._stop_event.wait(timeout=10)
@@ -458,12 +462,18 @@ class MultiBotManager:
 
                 # -- Execute BUY / SELL --
                 if signal.action in (SignalAction.BUY, SignalAction.SELL):
-                    # Guard: skip if this bot already has an open position
-                    if bot.active_tickets:
-                        bot.blocked_reason = f"Already has {len(bot.active_tickets)} open position(s)"
+                    # Guard: per-bot position limit (keeps each bot independent;
+                    # the fleet-wide ceiling lives in risk_mgr.can_trade).
+                    per_bot_cap = getattr(self.config, "max_positions_per_bot", 1)
+                    if len(bot.active_tickets) >= per_bot_cap:
+                        bot.blocked_reason = (
+                            f"Per-bot limit reached "
+                            f"({len(bot.active_tickets)}/{per_bot_cap} open)"
+                        )
                         logger.debug(
-                            "Bot#%d signal=%s but already has %d active position(s) — skipping.",
-                            bot.bot_id, signal.action.value, len(bot.active_tickets),
+                            "Bot#%d signal=%s but at per-bot limit (%d/%d) — skipping.",
+                            bot.bot_id, signal.action.value,
+                            len(bot.active_tickets), per_bot_cap,
                         )
                     else:
                         bot.blocked_reason = ""  # clear on attempt

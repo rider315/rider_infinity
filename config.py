@@ -100,7 +100,17 @@ class Config:
         # --- Risk management ---------------------------------------------
         self.max_risk_per_trade: float = float(os.getenv("MAX_RISK_PER_TRADE", "1.0"))
         self.max_daily_drawdown: float = float(os.getenv("MAX_DAILY_DRAWDOWN", "3.0"))
-        self.max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
+        # Account-wide *portfolio* safety ceiling: the maximum number of
+        # positions that may be open simultaneously across the WHOLE fleet
+        # (every bot combined). This is a hard risk cap, NOT a per-bot
+        # throttle — each bot is limited to its own positions separately via
+        # ``max_positions_per_bot``. It must therefore be sized for the fleet:
+        # with N bots each allowed 1 position, keep this >= N (plus headroom)
+        # or the fleet starves itself. It only trips on a genuine runaway.
+        self.max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "12"))
+        # Max simultaneous positions a SINGLE bot may hold on its own symbol.
+        # Keeps each bot independent; the fleet-wide cap above is the safety net.
+        self.max_positions_per_bot: int = int(os.getenv("MAX_POSITIONS_PER_BOT", "1"))
         self.max_spread_points: int = int(os.getenv("MAX_SPREAD_POINTS", "30"))
         self.default_sl_pips: int = int(os.getenv("DEFAULT_SL_PIPS", "50"))
         self.default_tp_pips: int = int(os.getenv("DEFAULT_TP_PIPS", "100"))
