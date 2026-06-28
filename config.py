@@ -168,6 +168,25 @@ class Config:
             if feed.strip()
         ] or []  # Empty = use defaults
 
+        # --- Cloud Optimisation (Optional) --------------------------------
+        self.aws_cloud_enabled: bool = (
+            os.getenv("AWS_CLOUD_ENABLED", "false").lower() in ("true", "1", "yes")
+        )
+        self.aws_region: str = os.getenv("AWS_REGION", "us-east-1")
+        self.aws_cloud_s3_bucket: str = os.getenv("AWS_CLOUD_S3_BUCKET", "")
+        self.aws_cloud_max_cost_per_job: float = float(
+            os.getenv("AWS_CLOUD_MAX_COST_PER_JOB", "10.0")
+        )
+        self.aws_cloud_max_workers: int = int(
+            os.getenv("AWS_CLOUD_MAX_WORKERS", "10")
+        )
+        self.aws_cloud_max_runtime_mins: int = int(
+            os.getenv("AWS_CLOUD_MAX_RUNTIME_MINS", "120")
+        )
+        self.aws_cloud_instance_type: str = os.getenv(
+            "AWS_CLOUD_INSTANCE_TYPE", "c6a.large"
+        )
+
     # -- Convenience helpers -----------------------------------------------
 
     def get_mt5_timeframe(self, label: str | None = None) -> int:

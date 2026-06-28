@@ -28,6 +28,12 @@ from strategies import get_strategy
 from strategies.base import SignalAction
 from utils import pips_to_price, price_to_pips, setup_logger
 from backtester import BacktestDB, BacktestTrade
+from cloud.worker.worker_backtest import (
+    run_single as _backtest_run_single,
+    compute_metrics as _backtest_compute_metrics,
+    check_sl_tp as _backtest_check_sl_tp,
+    calc_pnl_pips as _backtest_calc_pnl_pips,
+)
 
 logger = setup_logger("optimizer")
 
@@ -272,28 +278,34 @@ PARAM_GRIDS: dict[str, dict[str, dict[str, list]]] = {
         },
         "ema_slow": {
             "quick":  [20],
-            "normal": [20, 30],
-            "deep":   [15, 20, 30],
+            "normal": [20],
+            "deep":   [20, 30],
         },
+        # Higher ADX floor = fewer but cleaner breakouts (better win rate).
         "adx_min": {
-            "quick":  [15, 22],
-            "normal": [18, 25],
-            "deep":   [12, 18, 25],
+            "quick":  [18, 25],
+            "normal": [20, 28],
+            "deep":   [15, 22, 30],
         },
         "breakout_lookback": {
-            "quick":  [6, 10],
+            "quick":  [8],
             "normal": [6, 10],
             "deep":   [6, 12],
         },
+        # SL and TP BOTH swept so the optimiser can find a positive
+        # reward:risk (the -2010-pip backtest used TP6<SL8, which needs a
+        # 57% win rate to break even). tp_pips is also the live Quick-Exit
+        # target. Note: backtest does NOT model spread, so favour combos with
+        # a comfortable margin, not razor-thin edges.
         "sl_pips": {
-            "quick":  [8],
-            "normal": [8],
-            "deep":   [8],
+            "quick":  [5, 8],
+            "normal": [5, 8],
+            "deep":   [4, 6, 8],
         },
         "tp_pips": {
-            "quick":  [5, 10],
-            "normal": [5, 10],
-            "deep":   [4, 8, 12],
+            "quick":  [6, 10],
+            "normal": [6, 10],
+            "deep":   [6, 10, 15],
         },
     },
 }
@@ -429,6 +441,45 @@ class OptimizationResult:
             "best_metric_value": round(self.best_metric_value, 2),
             "results_count": len(self.results),
         }
+
+
+# =====================================================================
+#  Combo Generator (module-level, used by both local & cloud optimiser)
+# =====================================================================
+
+def generate_combos(
+    strategy_name: str, mode: str, optimize_sltp: bool,
+) -> list[dict]:
+    """Generate all valid parameter combinations for a strategy.
+
+    Module-level so it can be imported by the cloud orchestrator without
+    instantiating StrategyOptimizer.
+    """
+    grid = PARAM_GRIDS[strategy_name]
+    validator = VALIDATORS.get(strategy_name, lambda p: True)
+
+    param_names = []
+    param_values = []
+    for name, mode_dict in grid.items():
+        values = mode_dict.get(mode, mode_dict["normal"])
+        param_names.append(name)
+        param_values.append(values)
+
+    if optimize_sltp:
+        for sltp_name, mode_dict in SLTP_GRIDS.items():
+            if sltp_name in param_names:
+                continue
+            values = mode_dict.get(mode, mode_dict["normal"])
+            param_names.append(sltp_name)
+            param_values.append(values)
+
+    combos = []
+    for vals in product(*param_values):
+        params = dict(zip(param_names, vals))
+        if validator(params):
+            combos.append(params)
+
+    return combos
 
 
 # =====================================================================
@@ -668,38 +719,9 @@ class StrategyOptimizer:
     def _generate_combos(
         self, strategy_name: str, mode: str, optimize_sltp: bool,
     ) -> list[dict]:
-        """Generate all valid parameter combinations for a strategy."""
-        grid = PARAM_GRIDS[strategy_name]
-        validator = VALIDATORS.get(strategy_name, lambda p: True)
+        return generate_combos(strategy_name, mode, optimize_sltp)
 
-        # Build lists of (param_name, values) pairs
-        param_names = []
-        param_values = []
-        for name, mode_dict in grid.items():
-            values = mode_dict.get(mode, mode_dict["normal"])
-            param_names.append(name)
-            param_values.append(values)
-
-        # Add SL/TP if requested (skip any the strategy grid already sweeps,
-        # e.g. meanrev defines its own reversion-appropriate sl/tp ranges).
-        if optimize_sltp:
-            for sltp_name, mode_dict in SLTP_GRIDS.items():
-                if sltp_name in param_names:
-                    continue
-                values = mode_dict.get(mode, mode_dict["normal"])
-                param_names.append(sltp_name)
-                param_values.append(values)
-
-        # Generate cartesian product and filter
-        combos = []
-        for vals in product(*param_values):
-            params = dict(zip(param_names, vals))
-            if validator(params):
-                combos.append(params)
-
-        return combos
-
-    # ── Single Backtest (lightweight) ────────────────────────────────
+    # ── Single Backtest — delegates to extracted pure function ───────
 
     def _run_single(
         self,
@@ -716,210 +738,13 @@ class StrategyOptimizer:
         default_tp: float,
         max_open_trades: int = 5,
     ) -> dict:
-        """Run a single backtest with given params. Returns metrics dict."""
-        # Separate SL/TP from indicator params
-        indicator_params = {k: v for k, v in params.items() if k not in ("sl_pips", "tp_pips")}
-        sl_pips = params.get("sl_pips", default_sl)
-        tp_pips = params.get("tp_pips", default_tp)
-
-        # Instantiate strategy with these params
-        strategy = get_strategy(strategy_name, sl_pips=sl_pips, tp_pips=tp_pips, **indicator_params)
-        # Honour an optional time-stop (e.g. mean reversion's max_hold_bars) so
-        # that parameter is actually swept rather than ignored.
-        max_hold_bars = int(getattr(strategy, "max_hold_bars", 0) or 0)
-
-        total_bars = len(df)
-        WARMUP = min(200, total_bars // 3)
-        equity = initial_balance
-        open_trades: list[dict] = []
-        closed_trades: list[BacktestTrade] = []
-        pending_signal = None
-        trade_counter = 0
-
-        for i in range(WARMUP, total_bars):
-            bar = df.iloc[i]
-            bar_time = bar["time"].isoformat()
-
-            # Execute pending signal at this bar's open
-            if pending_signal is not None:
-                sig = pending_signal
-                pending_signal = None
-
-                if len(open_trades) < max_open_trades:
-                    entry_price = bar["open"]
-                    trade_counter += 1
-
-                    if sig.action == SignalAction.BUY:
-                        sl_p = round(entry_price - pips_to_price(sl_pips, symbol, point), digits)
-                        tp_p = round(entry_price + pips_to_price(tp_pips, symbol, point), digits)
-                        direction = "BUY"
-                    else:
-                        sl_p = round(entry_price + pips_to_price(sl_pips, symbol, point), digits)
-                        tp_p = round(entry_price - pips_to_price(tp_pips, symbol, point), digits)
-                        direction = "SELL"
-
-                    open_trades.append({
-                        "direction": direction,
-                        "entry_price": entry_price,
-                        "entry_time": bar_time,
-                        "entry_index": i,
-                        "sl_price": sl_p, "tp_price": tp_p,
-                    })
-
-            # Check SL/TP for open trades
-            still_open = []
-            for trade in open_trades:
-                hit = self._check_sl_tp(trade, bar)
-                if not hit and max_hold_bars and (i - trade["entry_index"]) >= max_hold_bars:
-                    hit = (bar["close"], "TIME")
-                if hit:
-                    exit_price, exit_reason = hit
-                    pnl_pips = self._calc_pnl_pips(
-                        trade["direction"], trade["entry_price"],
-                        exit_price, symbol, point,
-                    )
-                    pnl_money = pnl_pips * pip_value_per_lot * lot_size
-                    equity += pnl_money
-                    closed_trades.append(BacktestTrade(
-                        pnl_pips=round(pnl_pips, 1),
-                        pnl_money=round(pnl_money, 2),
-                        exit_reason=exit_reason,
-                        entry_time=trade["entry_time"],
-                        exit_time=bar_time,
-                    ))
-                else:
-                    still_open.append(trade)
-            open_trades = still_open
-
-            # Run strategy
-            window = df.iloc[max(0, i - 499):i + 1].copy().reset_index(drop=True)
-            try:
-                signal = strategy.analyze(window, symbol)
-            except Exception:
-                signal = None
-
-            if signal and signal.action in (SignalAction.BUY, SignalAction.SELL):
-                pending_signal = signal
-
-        # Close remaining
-        if open_trades:
-            final = df.iloc[-1]
-            for trade in open_trades:
-                pnl_pips = self._calc_pnl_pips(
-                    trade["direction"], trade["entry_price"],
-                    final["close"], symbol, point,
-                )
-                pnl_money = pnl_pips * pip_value_per_lot * lot_size
-                equity += pnl_money
-                closed_trades.append(BacktestTrade(
-                    pnl_pips=round(pnl_pips, 1),
-                    pnl_money=round(pnl_money, 2),
-                    exit_reason="END",
-                    entry_time=trade["entry_time"],
-                    exit_time=final["time"].isoformat(),
-                ))
-
-        # Compute metrics
-        return self._compute_metrics(closed_trades, initial_balance, equity)
-
-    @staticmethod
-    def _check_sl_tp(trade: dict, bar: pd.Series) -> tuple[float, str] | None:
-        sl, tp = trade["sl_price"], trade["tp_price"]
-        high, low = bar["high"], bar["low"]
-        if trade["direction"] == "BUY":
-            sl_hit = low <= sl
-            tp_hit = high >= tp
-            if sl_hit and tp_hit:
-                return (sl, "SL")
-            if sl_hit:
-                return (sl, "SL")
-            if tp_hit:
-                return (tp, "TP")
-        else:
-            sl_hit = high >= sl
-            tp_hit = low <= tp
-            if sl_hit and tp_hit:
-                return (sl, "SL")
-            if sl_hit:
-                return (sl, "SL")
-            if tp_hit:
-                return (tp, "TP")
-        return None
-
-    @staticmethod
-    def _calc_pnl_pips(direction, entry, exit_p, symbol, point):
-        delta = (exit_p - entry) if direction == "BUY" else (entry - exit_p)
-        return price_to_pips(delta, symbol, point)
-
-    @staticmethod
-    def _compute_metrics(
-        trades: list[BacktestTrade],
-        initial_balance: float,
-        final_equity: float,
-    ) -> dict:
-        """Compute performance metrics from a list of trades."""
-        total = len(trades)
-        if total == 0:
-            return {
-                "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
-                "total_pnl_pips": 0, "total_pnl_money": 0,
-                "profit_factor": 0, "max_drawdown_pct": 0,
-                "sharpe_ratio": 0, "avg_win_pips": 0, "avg_loss_pips": 0,
-            }
-
-        wins = sum(1 for t in trades if t.pnl_pips > 0)
-        losses = total - wins
-        win_rate = wins / total * 100
-
-        total_pnl_pips = sum(t.pnl_pips for t in trades)
-        total_pnl_money = round(final_equity - initial_balance, 2)
-
-        gross_profit = sum(t.pnl_money for t in trades if t.pnl_money > 0)
-        gross_loss = abs(sum(t.pnl_money for t in trades if t.pnl_money < 0))
-        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (
-            999.99 if gross_profit > 0 else 0
+        return _backtest_run_single(
+            strategy_name=strategy_name, params=params, df=df,
+            symbol=symbol, point=point, digits=digits,
+            pip_value_per_lot=pip_value_per_lot, lot_size=lot_size,
+            initial_balance=initial_balance, default_sl=default_sl,
+            default_tp=default_tp, max_open_trades=max_open_trades,
         )
-
-        # Average win/loss
-        w_pips = [t.pnl_pips for t in trades if t.pnl_pips > 0]
-        l_pips = [t.pnl_pips for t in trades if t.pnl_pips <= 0]
-        avg_win = (sum(w_pips) / len(w_pips)) if w_pips else 0
-        avg_loss = (sum(l_pips) / len(l_pips)) if l_pips else 0
-
-        # Max drawdown
-        equity = initial_balance
-        peak = equity
-        max_dd_pct = 0.0
-        for t in trades:
-            equity += t.pnl_money
-            if equity > peak:
-                peak = equity
-            dd_pct = ((peak - equity) / peak * 100) if peak > 0 else 0
-            if dd_pct > max_dd_pct:
-                max_dd_pct = dd_pct
-
-        # Sharpe
-        sharpe = 0.0
-        if len(trades) > 1:
-            rets = [t.pnl_money for t in trades]
-            avg_r = sum(rets) / len(rets)
-            var = sum((r - avg_r) ** 2 for r in rets) / (len(rets) - 1)
-            std = math.sqrt(var) if var > 0 else 0
-            sharpe = (avg_r / std * math.sqrt(252)) if std > 0 else 0
-
-        return {
-            "total_trades": total,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": round(win_rate, 1),
-            "total_pnl_pips": round(total_pnl_pips, 1),
-            "total_pnl_money": round(total_pnl_money, 2),
-            "profit_factor": round(min(profit_factor, 999.99), 2),
-            "max_drawdown_pct": round(max_dd_pct, 1),
-            "sharpe_ratio": round(sharpe, 2),
-            "avg_win_pips": round(avg_win, 1),
-            "avg_loss_pips": round(avg_loss, 1),
-        }
 
 
 # ======================================================================

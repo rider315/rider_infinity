@@ -176,19 +176,17 @@ def create_app() -> Flask:
 
     @app.route("/api/journal", methods=["GET"])
     def api_journal():
-        """Read the trade journal CSV and return the last 50 entries."""
+        """Return the most recent 50 trades from the history DB.
+
+        Uses bot_history.db (has full P&L data) instead of the
+        append-only trade_journal.csv (entry-only).
+        """
         try:
-            if not _JOURNAL_PATH.exists():
-                return jsonify([])
-
-            with open(_JOURNAL_PATH, newline="", encoding="utf-8") as fh:
-                reader = csv.DictReader(fh)
-                rows = list(reader)
-
-            # Return the most recent 50 trades (last rows in file)
-            last_50 = rows[-50:]
-            last_50.reverse()  # newest first
-            return jsonify(last_50)
+            trades = _bot_mgr.history_db.get_trades()
+            # Most recent 50, newest first
+            trades = trades[-50:]
+            trades.reverse()
+            return jsonify(trades)
         except Exception as exc:
             logger.error("GET /api/journal error: %s", exc)
             return jsonify({"error": str(exc)}), 500
@@ -462,20 +460,11 @@ def create_app() -> Flask:
 
     @app.route("/api/bot-history/<int:bot_id>/trades", methods=["GET"])
     def api_bot_history_trades(bot_id: int):
-        """Return trades from the trade journal CSV filtered by bot_id."""
+        """Return trades from bot_history DB filtered by bot_id."""
         try:
-            if not _JOURNAL_PATH.exists():
-                return jsonify([])
-
-            with open(_JOURNAL_PATH, newline="", encoding="utf-8") as fh:
-                reader = csv.DictReader(fh)
-                rows = [
-                    row for row in reader
-                    if str(row.get("bot_id", "")) == str(bot_id)
-                ]
-
-            rows.reverse()  # newest first
-            return jsonify(rows[:100])  # cap at 100 trades
+            trades = _bot_mgr.history_db.get_trades(bot_id=bot_id)
+            trades.reverse()  # newest first
+            return jsonify(trades[:100])
         except Exception as exc:
             logger.error("GET /api/bot-history/%d/trades error: %s", bot_id, exc)
             return jsonify({"error": str(exc)}), 500
@@ -1043,6 +1032,7 @@ def create_app() -> Flask:
     # ==================================================================
 
     _optimizer = None
+    _cloud_optimizer = None
 
     def _get_optimizer():
         nonlocal _optimizer
@@ -1051,9 +1041,20 @@ def create_app() -> Flask:
             _optimizer = StrategyOptimizer(_config)
         return _optimizer
 
+    def _get_cloud_optimizer():
+        nonlocal _cloud_optimizer
+        if _cloud_optimizer is None:
+            from cloud.cloud_optimizer import CloudOptimizer
+            _cloud_optimizer = CloudOptimizer(_config)
+        return _cloud_optimizer
+
     @app.route("/api/optimize/run", methods=["POST"])
     def api_optimize_run():
-        """Start a strategy optimisation in a background thread."""
+        """Start a strategy optimisation.
+
+        Pass ``"cloud": true`` in the body to distribute across AWS
+        Spot Instances instead of running locally.
+        """
         try:
             body = request.get_json(force=True)
             required = ["strategy", "symbol", "timeframe", "date_from", "date_to"]
@@ -1061,7 +1062,13 @@ def create_app() -> Flask:
                 if key not in body:
                     return jsonify({"error": f"Missing field: {key}"}), 400
 
-            optimizer = _get_optimizer()
+            use_cloud = body.get("cloud", False)
+
+            if use_cloud:
+                optimizer = _get_cloud_optimizer()
+            else:
+                optimizer = _get_optimizer()
+
             opt_id = optimizer.start(
                 strategy_name=body["strategy"],
                 symbol=body["symbol"],
@@ -1076,7 +1083,11 @@ def create_app() -> Flask:
                 min_trades=int(body.get("min_trades", 3)),
                 max_open_trades=int(body.get("max_open_trades", 5)),
             )
-            return jsonify({"opt_id": opt_id, "status": "running"})
+            return jsonify({
+                "opt_id": opt_id,
+                "status": "running",
+                "cloud": use_cloud,
+            })
         except Exception as exc:
             logger.error("POST /api/optimize/run error: %s", exc)
             return jsonify({"error": str(exc)}), 500
@@ -1085,8 +1096,11 @@ def create_app() -> Flask:
     def api_optimize_stop(opt_id: str):
         """Stop a running optimisation. Partial results are preserved."""
         try:
+            # Check both local and cloud optimizers
             optimizer = _get_optimizer()
             stopped = optimizer.stop(opt_id)
+            if not stopped and _cloud_optimizer is not None:
+                stopped = _cloud_optimizer.stop(opt_id)
             if not stopped:
                 return jsonify({"error": "Optimisation not found or already finished"}), 404
             return jsonify({"stopped": True, "opt_id": opt_id})
@@ -1096,10 +1110,12 @@ def create_app() -> Flask:
 
     @app.route("/api/optimize/status/<opt_id>", methods=["GET"])
     def api_optimize_status(opt_id: str):
-        """Poll optimisation progress."""
+        """Poll optimisation progress (checks both local and cloud)."""
         try:
             optimizer = _get_optimizer()
             status = optimizer.get_status(opt_id)
+            if status is None and _cloud_optimizer is not None:
+                status = _cloud_optimizer.get_status(opt_id)
             if status is None:
                 return jsonify({"error": "Optimisation not found"}), 404
             return jsonify(status)
@@ -1109,15 +1125,63 @@ def create_app() -> Flask:
 
     @app.route("/api/optimize/results/<opt_id>", methods=["GET"])
     def api_optimize_results(opt_id: str):
-        """Return full optimisation results with ranked combos."""
+        """Return full optimisation results (checks both local and cloud)."""
         try:
             optimizer = _get_optimizer()
             results = optimizer.get_results(opt_id)
+            if results is None and _cloud_optimizer is not None:
+                results = _cloud_optimizer.get_results(opt_id)
             if results is None:
                 return jsonify({"error": "Optimisation not found"}), 404
             return jsonify(results)
         except Exception as exc:
             logger.error("GET /api/optimize/results error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    # ── Cloud-specific endpoints ─────────────────────────────────────
+
+    @app.route("/api/optimize/cloud/config", methods=["GET"])
+    def api_cloud_config():
+        """Check cloud optimisation availability and configuration."""
+        try:
+            from cloud.setup import verify_setup
+            status = verify_setup()
+            status["enabled"] = getattr(_config, "aws_cloud_enabled", False)
+            return jsonify(status)
+        except ImportError:
+            return jsonify({"ready": False, "enabled": False,
+                            "reason": "Cloud module not installed (pip install boto3 pyarrow)."})
+        except Exception as exc:
+            logger.error("GET /api/optimize/cloud/config error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/optimize/cloud/setup", methods=["POST"])
+    def api_cloud_setup():
+        """Run one-time AWS infrastructure setup."""
+        try:
+            from cloud.setup import run_setup
+            region = getattr(_config, "aws_region", "us-east-1")
+            bucket = getattr(_config, "aws_cloud_s3_bucket", "") or None
+            result = run_setup(region=region, bucket_name=bucket)
+            return jsonify(result)
+        except Exception as exc:
+            logger.error("POST /api/optimize/cloud/setup error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/optimize/cloud/estimate", methods=["POST"])
+    def api_cloud_estimate():
+        """Estimate cost and time for a cloud optimisation job."""
+        try:
+            body = request.get_json(force=True)
+            cloud_opt = _get_cloud_optimizer()
+            estimate = cloud_opt.estimate(
+                strategy_name=body["strategy"],
+                mode=body.get("mode", "normal"),
+                optimize_sltp=body.get("optimize_sltp", False),
+            )
+            return jsonify(estimate)
+        except Exception as exc:
+            logger.error("POST /api/optimize/cloud/estimate error: %s", exc)
             return jsonify({"error": str(exc)}), 500
 
     @app.route("/api/optimize/grids", methods=["GET"])
@@ -1492,6 +1556,17 @@ def _init_subsystems() -> None:
 
     # -- News Intelligence Engine ------------------------------------------
     _news_engine = _init_news_engine(_config)
+
+    # -- Cloud cleanup (best-effort) ---------------------------------------
+    if getattr(_config, "aws_cloud_enabled", False):
+        try:
+            from cloud.cleanup import run_full_cleanup
+            import threading as _thr
+            _thr.Thread(target=run_full_cleanup, daemon=True,
+                        name="cloud-cleanup").start()
+            logger.info("Cloud cleanup started in background.")
+        except Exception as exc:
+            logger.debug("Cloud cleanup skipped: %s", exc)
 
 
 def _init_news_engine(config: Config) -> dict | None:

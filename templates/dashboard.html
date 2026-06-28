@@ -2976,7 +2976,7 @@ table.journal-table td {
 
     let html = `<div class="journal-scroll"><table class="journal-table">
       <thead><tr>
-        <th>Time</th><th>Bot</th><th>Symbol</th><th>Action</th><th>Lot</th><th>Entry</th><th>Conf.</th><th>Mode</th>
+        <th>Time</th><th>Bot</th><th>Symbol</th><th>Action</th><th>Status</th><th>Profit</th><th>Pips</th><th>Exit</th>
       </tr></thead><tbody>`;
 
     j.forEach(t => {
@@ -2987,18 +2987,42 @@ table.journal-table td {
           ? '<span class="badge badge-sell" style="font-size:.62rem;">Sell</span>'
           : `<span class="badge badge-hold" style="font-size:.62rem;">${action||'—'}</span>`;
 
-      const conf = t.confidence != null ? Math.round(parseFloat(t.confidence) * 100) + '%' : '—';
-      const timeStr = t.time ? new Date(t.time).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
+      const openTime = t.open_time || t.time;
+      const timeStr = openTime ? new Date(openTime).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
+      const dateStr = openTime ? new Date(openTime).toLocaleDateString('en-GB', {day:'2-digit',month:'short'}) : '';
+
+      const status = (t.status || 'OPEN').toUpperCase();
+      const statusBadge = status === 'CLOSED'
+        ? '<span class="badge" style="font-size:.58rem;background:rgba(0,255,136,.12);color:var(--green);">CLOSED</span>'
+        : '<span class="badge" style="font-size:.58rem;background:rgba(255,193,7,.15);color:#ffc107;">OPEN</span>';
+
+      let profitHtml = '—';
+      if (t.profit != null && status === 'CLOSED') {
+        const p = parseFloat(t.profit);
+        const cls = p >= 0 ? 'color-green' : 'color-red';
+        const sign = p >= 0 ? '+' : '';
+        profitHtml = `<span class="${cls} fw-700">${sign}$${p.toFixed(2)}</span>`;
+      }
+
+      let pipsHtml = '—';
+      if (t.pips != null && status === 'CLOSED') {
+        const p = parseFloat(t.pips);
+        const cls = p >= 0 ? 'color-green' : 'color-red';
+        const sign = p >= 0 ? '+' : '';
+        pipsHtml = `<span class="${cls}">${sign}${p.toFixed(1)}</span>`;
+      }
+
+      const exitReason = (status === 'CLOSED' && t.exit_reason) ? t.exit_reason : '—';
 
       html += `<tr>
-        <td class="color-muted">${timeStr}</td>
+        <td class="color-muted">${dateStr} ${timeStr}</td>
         <td class="color-gold">#${t.bot_id||'—'}</td>
         <td class="fw-700">${t.symbol||'—'}</td>
         <td>${actionBadge}</td>
-        <td class="tabular">${t.lot != null ? fmt(t.lot) : '—'}</td>
-        <td class="tabular">${t.entry != null ? fmt(t.entry, 5) : '—'}</td>
-        <td>${conf}</td>
-        <td>${modeBadge(t.dry_run !== false)}</td>
+        <td>${statusBadge}</td>
+        <td class="tabular">${profitHtml}</td>
+        <td class="tabular">${pipsHtml}</td>
+        <td class="tabular" style="font-size:.7rem;">${exitReason}</td>
       </tr>`;
     });
 
@@ -3854,9 +3878,25 @@ table.journal-table td {
     if (trades.length === 0) {
       tradesHtml = '<div style="color:var(--text-muted);font-size:.75rem;padding:.5rem;">No trades recorded for this bot</div>';
     } else {
-      tradesHtml = `<div style="max-height:250px;overflow-y:auto;"><table class="history-trades-table">
+      // Compute summary stats for this bot's trades
+      const closedTrades = trades.filter(t => (t.status||'').toUpperCase() === 'CLOSED' && t.profit != null);
+      const totalProfit = closedTrades.reduce((s, t) => s + parseFloat(t.profit || 0), 0);
+      const totalPips = closedTrades.reduce((s, t) => s + parseFloat(t.pips || 0), 0);
+      const wins = closedTrades.filter(t => parseFloat(t.profit || 0) > 0).length;
+      const winRate = closedTrades.length > 0 ? (wins / closedTrades.length * 100).toFixed(0) : 0;
+      const profitCls = totalProfit >= 0 ? 'color-green' : 'color-red';
+      const profitSign = totalProfit >= 0 ? '+' : '';
+
+      tradesHtml = `<div style="display:flex;gap:1rem;padding:.5rem .7rem;font-size:.72rem;border-bottom:1px solid var(--border);">
+        <span>Closed: <b>${closedTrades.length}</b></span>
+        <span>Win Rate: <b>${winRate}%</b></span>
+        <span>P&L: <b class="${profitCls}">${profitSign}$${totalProfit.toFixed(2)}</b></span>
+        <span>Pips: <b class="${profitCls}">${profitSign}${totalPips.toFixed(1)}</b></span>
+      </div>`;
+
+      tradesHtml += `<div style="max-height:250px;overflow-y:auto;"><table class="history-trades-table">
         <thead><tr>
-          <th>Time</th><th>Action</th><th>Lot</th><th>Entry</th><th>SL</th><th>TP</th><th>Conf.</th><th>Mode</th>
+          <th>Time</th><th>Action</th><th>Status</th><th>Entry</th><th>Exit</th><th>Profit</th><th>Pips</th><th>Reason</th>
         </tr></thead><tbody>`;
       trades.forEach(t => {
         const action = (t.action || '').toUpperCase();
@@ -3865,21 +3905,43 @@ table.journal-table td {
           : action === 'SELL'
             ? '<span class="badge badge-sell" style="font-size:.58rem;">Sell</span>'
             : `<span class="badge badge-hold" style="font-size:.58rem;">${action || '—'}</span>`;
-        const timeStr = t.time ? new Date(t.time).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
-        const dateStr = t.time ? new Date(t.time).toLocaleDateString('en-GB', {day:'2-digit',month:'short'}) : '';
-        const conf = t.confidence != null ? Math.round(Number(t.confidence) * 100) + '%' : '—';
-        const mode = t.dry_run === 'True' || t.dry_run === true
-          ? '<span class="badge badge-dry" style="font-size:.55rem;">DRY</span>'
-          : '<span class="badge badge-live" style="font-size:.55rem;">LIVE</span>';
+        const openTime = t.open_time || t.time;
+        const timeStr = openTime ? new Date(openTime).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
+        const dateStr = openTime ? new Date(openTime).toLocaleDateString('en-GB', {day:'2-digit',month:'short'}) : '';
+
+        const status = (t.status || 'OPEN').toUpperCase();
+        const statusBadge = status === 'CLOSED'
+          ? '<span class="badge" style="font-size:.55rem;background:rgba(0,255,136,.12);color:var(--green);">CLOSED</span>'
+          : '<span class="badge" style="font-size:.55rem;background:rgba(255,193,7,.15);color:#ffc107;">OPEN</span>';
+
+        let profitHtml = '—';
+        if (t.profit != null && status === 'CLOSED') {
+          const p = parseFloat(t.profit);
+          const cls = p >= 0 ? 'color-green' : 'color-red';
+          const sign = p >= 0 ? '+' : '';
+          profitHtml = `<span class="${cls} fw-700">${sign}$${p.toFixed(2)}</span>`;
+        }
+
+        let pipsHtml = '—';
+        if (t.pips != null && status === 'CLOSED') {
+          const p = parseFloat(t.pips);
+          const cls = p >= 0 ? 'color-green' : 'color-red';
+          const sign = p >= 0 ? '+' : '';
+          pipsHtml = `<span class="${cls}">${sign}${p.toFixed(1)}</span>`;
+        }
+
+        const exitPrice = (status === 'CLOSED' && t.exit_price) ? Number(t.exit_price).toFixed(5) : '—';
+        const exitReason = (status === 'CLOSED' && t.exit_reason) ? t.exit_reason : '—';
+
         tradesHtml += `<tr>
           <td class="color-muted">${dateStr} ${timeStr}</td>
           <td>${actionBadge}</td>
-          <td class="tabular">${t.lot || '—'}</td>
-          <td class="tabular">${t.entry ? Number(t.entry).toFixed(5) : '—'}</td>
-          <td class="tabular">${t.sl ? Number(t.sl).toFixed(5) : '—'}</td>
-          <td class="tabular">${t.tp ? Number(t.tp).toFixed(5) : '—'}</td>
-          <td>${conf}</td>
-          <td>${mode}</td>
+          <td>${statusBadge}</td>
+          <td class="tabular">${t.entry_price ? Number(t.entry_price).toFixed(5) : '—'}</td>
+          <td class="tabular">${exitPrice}</td>
+          <td class="tabular">${profitHtml}</td>
+          <td class="tabular">${pipsHtml}</td>
+          <td style="font-size:.65rem;">${exitReason}</td>
         </tr>`;
       });
       tradesHtml += '</tbody></table></div>';
