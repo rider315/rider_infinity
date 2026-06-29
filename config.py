@@ -79,6 +79,14 @@ class Config:
             "MT5_PATH",
             r"C:\Program Files\MetaTrader 5\terminal64.exe",
         )
+        # Open the MT5 terminal as a visible window on connect (so it's
+        # reachable on a server, e.g. to enable Algo Trading). Set false if you
+        # manage the terminal yourself or run truly headless.
+        self.mt5_auto_launch: bool = (
+            os.getenv("MT5_AUTO_LAUNCH", "true").lower() in ("true", "1", "yes")
+        )
+        # Seconds to wait after launching the terminal before connecting.
+        self.mt5_launch_wait_sec: float = float(os.getenv("MT5_LAUNCH_WAIT_SEC", "8"))
 
         # --- Trading defaults --------------------------------------------
         self.default_symbol: str = os.getenv("DEFAULT_SYMBOL", "EURUSD")

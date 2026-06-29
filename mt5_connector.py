@@ -8,6 +8,9 @@ through the bot's log file.
 """
 
 import logging
+import os
+import subprocess
+import time
 from typing import Optional
 
 import MetaTrader5 as mt5
@@ -45,6 +48,33 @@ class MT5Connector:
 
     # ── Connection lifecycle ─────────────────────────────────────────────
 
+    def _launch_terminal(self) -> None:
+        """Start the MT5 terminal exe so a visible window opens in this session.
+
+        Skipped when auto-launch is disabled or the path doesn't exist. If a
+        terminal is already running for this install, Windows just focuses it
+        (MT5 allows one instance per data folder), so this is safe to call on
+        every connect. We wait a few seconds for the GUI/login to settle before
+        the caller runs ``mt5.initialize()``, which then attaches to it.
+        """
+        if not getattr(self.config, "mt5_auto_launch", True):
+            return
+
+        path = self.config.mt5_path
+        if not path or not os.path.exists(path):
+            logger.warning(
+                "MT5 path '%s' not found — cannot open the terminal window. "
+                "Set MT5_PATH in .env to terminal64.exe.", path,
+            )
+            return
+
+        try:
+            subprocess.Popen([path], close_fds=True)
+            logger.info("Opening MT5 terminal window: %s", path)
+            time.sleep(float(getattr(self.config, "mt5_launch_wait_sec", 8)))
+        except Exception as exc:
+            logger.warning("Could not auto-launch MT5 terminal: %s", exc)
+
     def connect(self) -> bool:
         """Initialise the MT5 terminal and log in.
 
@@ -56,6 +86,14 @@ class MT5Connector:
             ``True`` if the connection was established, ``False`` otherwise.
         """
         logger.info("Initialising MT5 terminal at '%s' …", self.config.mt5_path)
+
+        # Open the terminal as a visible window in the CURRENT session first.
+        # mt5.initialize() on its own attaches to (or spawns) a background
+        # terminal with no visible GUI — so on a server you never see it and
+        # can't reach the 'Algo Trading' button. Launching the exe ourselves
+        # makes a real window appear; initialize() then attaches to it. MT5 is
+        # single-instance per data folder, so this won't create duplicates.
+        self._launch_terminal()
 
         if not mt5.initialize(
             path=self.config.mt5_path,
