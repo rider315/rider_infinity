@@ -13,8 +13,11 @@ from typing import Optional
 import MetaTrader5 as mt5
 
 from config import Config
+from utils import setup_logger
 
-logger = logging.getLogger("mt5_connector")
+# Use the project logger so connector messages (incl. the Algo-Trading
+# permission warning) are written to logs/bot.log, not just stderr.
+logger = setup_logger("mt5_connector")
 
 
 class MT5Connector:
