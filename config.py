@@ -57,6 +57,7 @@ SYMBOL_GROUPS: dict[str, list[str]] = {
     "Majors":  ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"],
     "Crosses": ["EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "EURAUD", "GBPAUD"],
     "Metals":  ["XAUUSD", "XAGUSD"],
+    "Crypto":  ["BTCUSD", "ETHUSD", "LTCUSD", "XRPUSD"],
     "Exotics": ["USDTRY", "USDZAR", "USDMXN"],
 }
 

@@ -35,7 +35,7 @@ from market_data import MarketDataFeed
 from mt5_connector import MT5Connector
 from order_manager import OrderManager
 from risk_manager import RiskManager
-from session_manager import SessionManager
+from session_manager import SessionManager, is_crypto
 from strategies import get_strategy, list_strategies
 from strategies.base import SignalAction
 from utils import compute_atr, pips_to_price, price_to_pips, save_trade_to_journal, setup_logger
@@ -425,8 +425,9 @@ class MultiBotManager:
                 now = datetime.utcnow()
                 bot.last_check = now.strftime("%H:%M:%S")
 
-                # -- Market open check --
-                if not self.session_mgr.is_market_open():
+                # -- Market open check (crypto trades 24/7; forex respects the
+                #    weekend/session calendar) --
+                if not self.session_mgr.is_market_open(symbol=bot.symbol):
                     next_open = self.session_mgr.next_market_open()
                     bot.status = BotStatus.WAITING
                     bot.last_signal = f"MARKET CLOSED \u00b7 Opens {next_open['label']}"
@@ -545,6 +546,13 @@ class MultiBotManager:
           be absurdly wide (the root cause of the runaway losses).
         * The take-profit is forced to at least ``min_rr_ratio × sl_pips`` so a
           high win-rate can't be wrecked by tiny wins vs large losses.
+
+        Crypto (BTC, ETH, …) is special-cased: the forex ``min/max_sl_pips``
+        clamp is meaningless when 1 "pip" is a fraction of a dollar on a
+        $60k instrument (a 60-pip stop would be a few dollars — an instant
+        stop-out / broker "invalid stops" rejection). For crypto the stop is
+        always ATR-driven and clamped to a **percentage-of-price** band so it
+        scales with the instrument.
         """
         cfg = self.config
         rr = getattr(cfg, "min_rr_ratio", 1.8)
@@ -552,8 +560,11 @@ class MultiBotManager:
         sl_pips = float(signal.sl_pips or cfg.default_sl_pips)
         tp_pips = float(signal.tp_pips or cfg.default_tp_pips)
         atr_based = False
+        crypto = is_crypto(symbol)
 
-        if getattr(cfg, "use_atr_stops", False) and point > 0:
+        # Crypto always uses ATR stops (regardless of the global toggle); forex
+        # only when use_atr_stops is on.
+        if (crypto or getattr(cfg, "use_atr_stops", False)) and point > 0:
             atr_price = compute_atr(df, getattr(cfg, "atr_period", 14))
             if atr_price > 0:
                 atr_pips = price_to_pips(atr_price * cfg.atr_sl_mult, symbol, point)
@@ -561,8 +572,20 @@ class MultiBotManager:
                     sl_pips = atr_pips
                     atr_based = True
 
-        # Clamp the stop distance to sane bounds.
-        sl_pips = max(cfg.min_sl_pips, min(cfg.max_sl_pips, sl_pips))
+        if crypto and point > 0:
+            # Clamp to a fraction-of-price band (0.15%–1.5% of price) so the
+            # stop is neither dust nor absurd. Fall back to ~0.4% of price if
+            # ATR was unavailable.
+            price = float(df["close"].iloc[-1])
+            min_cx = price_to_pips(price * 0.0015, symbol, point)
+            max_cx = price_to_pips(price * 0.015, symbol, point)
+            if not atr_based:
+                sl_pips = price_to_pips(price * 0.004, symbol, point)
+            sl_pips = max(min_cx, min(max_cx, sl_pips))
+            atr_based = True  # always scale TP proportionally for crypto
+        else:
+            # Forex/metals: clamp the stop distance to sane pip bounds.
+            sl_pips = max(cfg.min_sl_pips, min(cfg.max_sl_pips, sl_pips))
 
         if atr_based:
             # Volatility-based: scale TP proportionally so it's actually

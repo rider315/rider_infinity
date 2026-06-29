@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 import MetaTrader5 as mt5
 
 from config import Config
+from session_manager import is_crypto
 
 # File where risk state is persisted across restarts
 _STATE_FILE = Path(__file__).resolve().parent / "data" / "risk_state.json"
@@ -319,25 +320,27 @@ class RiskManager:
             ``(True, "OK")`` when all checks pass, otherwise
             ``(False, "<reason>")`` explaining which check failed.
         """
-        # 1 — Market open? (basic weekend check)
+        # 1 — Market open? (basic weekend check). Crypto trades 24/7, so the
+        # forex weekend + trading-hours calendar is skipped for crypto symbols.
         now = datetime.utcnow()
-        weekday = now.weekday()  # 0=Mon … 6=Sun
-        if weekday == 6 or (weekday == 5 and now.hour >= 22):
-            return (False, "Market is closed (weekend).")
-        if weekday == 0 and now.hour < 0:
-            return (False, "Market has not opened yet (Sunday evening).")
+        if not is_crypto(symbol):
+            weekday = now.weekday()  # 0=Mon … 6=Sun
+            if weekday == 6 or (weekday == 5 and now.hour >= 22):
+                return (False, "Market is closed (weekend).")
+            if weekday == 0 and now.hour < 0:
+                return (False, "Market has not opened yet (Sunday evening).")
 
-        # 1b — Trading-hours window (UTC). Backtests show off-session hours
-        # produce mostly losing/noise trades; this gate restricts entries to
-        # the configured window (default 0..24 = no restriction).
-        start = getattr(self.config, "trade_hour_start", 0)
-        end = getattr(self.config, "trade_hour_end", 24)
-        if (start, end) != (0, 24):
-            h = now.hour
-            in_window = (start <= h < end) if start <= end else (h >= start or h < end)
-            if not in_window:
-                return (False, f"Outside trading hours ({h:02d}:00 UTC; "
-                               f"window {start:02d}-{end:02d}).")
+            # 1b — Trading-hours window (UTC). Backtests show off-session hours
+            # produce mostly losing/noise trades; this gate restricts entries to
+            # the configured window (default 0..24 = no restriction).
+            start = getattr(self.config, "trade_hour_start", 0)
+            end = getattr(self.config, "trade_hour_end", 24)
+            if (start, end) != (0, 24):
+                h = now.hour
+                in_window = (start <= h < end) if start <= end else (h >= start or h < end)
+                if not in_window:
+                    return (False, f"Outside trading hours ({h:02d}:00 UTC; "
+                                   f"window {start:02d}-{end:02d}).")
 
         # 2 — Max open positions (account-wide PORTFOLIO ceiling across all
         # bots combined — a safety cap, not the per-bot limit). If this trips

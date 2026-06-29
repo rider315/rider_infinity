@@ -621,8 +621,8 @@ class RiderInfinityBot:
             while True:
                 now = datetime.utcnow()
 
-                # -- Market open check --
-                if not self.session_mgr.is_market_open():
+                # -- Market open check (crypto trades 24/7) --
+                if not self.session_mgr.is_market_open(symbol=self.symbol):
                     self._print_status(now, 0.0, "MARKET CLOSED", 0)
                     time.sleep(60)
                     continue

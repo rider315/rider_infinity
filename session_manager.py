@@ -13,6 +13,28 @@ from datetime import datetime, timezone
 logger = logging.getLogger("session_manager")
 
 
+# Crypto bases that trade 24/7 (incl. weekends).  Detection is prefix-based so
+# broker suffixes are tolerated: "BTCUSD", "BTCUSD.", "BTCUSDm", "ETHUSDT" …
+CRYPTO_BASES: tuple[str, ...] = (
+    "BTC", "ETH", "LTC", "XRP", "BCH", "ADA", "DOT", "SOL", "DOGE", "BNB",
+    "LINK", "MATIC", "AVAX", "TRX", "XLM", "ATOM",
+)
+
+
+def is_crypto(symbol: str | None) -> bool:
+    """Return ``True`` when *symbol* is a crypto pair (trades 24/7).
+
+    Matches on the leading base ticker so broker-specific prefixes/suffixes
+    (``BTCUSD``, ``BTCUSD.``, ``BTCUSDm``, ``Bitcoin``…) are tolerated.
+    """
+    if not symbol:
+        return False
+    s = symbol.upper().lstrip("#._-")
+    if s.startswith("BITCOIN") or s.startswith("ETHEREUM"):
+        return True
+    return any(s.startswith(base) for base in CRYPTO_BASES)
+
+
 class SessionManager:
     """Tracks forex trading sessions and recommends pairs accordingly.
 
@@ -76,21 +98,29 @@ class SessionManager:
         logger.debug("Active sessions at %02d:%02d UTC: %s", hour, now.minute, active)
         return active
 
-    def is_market_open(self, now: datetime | None = None) -> bool:
-        """Check whether the forex market is open right now.
+    def is_market_open(
+        self, now: datetime | None = None, symbol: str | None = None
+    ) -> bool:
+        """Check whether the market is open right now for *symbol*.
 
-        The FX market runs from roughly Sunday 22:00 UTC to Friday
-        22:00 UTC.  This method returns ``True`` on weekdays (Mon-Fri)
-        when at least one major session is active.  Saturday and Sunday
-        always return ``False``.
+        Crypto symbols (BTC, ETH, …) trade 24/7, so this always returns
+        ``True`` for them.  For forex/metals, the FX market runs from roughly
+        Sunday 22:00 UTC to Friday 22:00 UTC; this returns ``True`` on weekdays
+        (Mon-Fri) when at least one major session is active and ``False`` on
+        Saturday/Sunday.
 
         Args:
             now: Optional explicit UTC datetime for testing.
+            symbol: Optional symbol; crypto pairs bypass the forex calendar.
 
         Returns:
             ``True`` if trading is possible, ``False`` otherwise.
         """
         now = now or datetime.now(timezone.utc)
+
+        # Crypto never closes — skip the forex weekend/session calendar.
+        if is_crypto(symbol):
+            return True
 
         # Monday = 0 … Sunday = 6.  Market is closed Sat & Sun.
         if now.weekday() >= 5:  # Saturday (5) or Sunday (6)
