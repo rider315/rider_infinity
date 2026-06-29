@@ -53,12 +53,21 @@ class ScalperStrategy(BaseStrategy):
     adx_period : int
         ADX lookback. Default 14.
     adx_min : float
-        Minimum ADX to allow an entry (chop filter). Default 25. Raised from
-        18 after the live export showed a 45.8% win-rate — most losers were
-        low-ADX chop breakouts that immediately reversed. A stricter gate
-        trades less but only when a real trend thrust is underway.
+        Minimum ADX to allow an entry (chop filter). Default 18. It was briefly
+        raised to 25 to cut low-ADX chop breakouts, but that — combined with the
+        "breakout must be on *this* candle" rule — made entries essentially
+        impossible: ADX is a lagging indicator and only reaches 25 several bars
+        *after* a breakout, by which point price is no longer at a fresh extreme.
+        The two conditions almost never co-occur, so the bot stopped trading.
+        Lowered back to 18 and paired with ``breakout_grace`` (below).
     breakout_lookback : int
         How many prior candles define the micro-breakout level. Default 8.
+    breakout_grace : int
+        How many of the most recent closed candles are allowed to have produced
+        the breakout. Default 3. With the old value of 1 the breakout had to land
+        on the exact candle ADX was read — see ``adx_min``. Allowing the last 3
+        candles lets the (lagging) ADX confirmation catch up to a breakout that
+        just happened.
     roc_period : int
         Rate-of-change lookback for the momentum push. Default 3.
     sl_pips : float
@@ -73,9 +82,10 @@ class ScalperStrategy(BaseStrategy):
         ema_fast: int = 5,
         ema_slow: int = 20,
         adx_period: int = 14,
-        adx_min: float = 25.0,
+        adx_min: float = 18.0,
         breakout_lookback: int = 8,
         roc_period: int = 3,
+        breakout_grace: int = 3,
         sl_pips: float = 8,
         tp_pips: float = 12,
     ) -> None:
@@ -87,6 +97,8 @@ class ScalperStrategy(BaseStrategy):
             )
         if breakout_lookback < 2:
             raise ValueError("breakout_lookback must be >= 2.")
+        if breakout_grace < 1:
+            raise ValueError("breakout_grace must be >= 1.")
 
         self.ema_fast = ema_fast
         self.ema_slow = ema_slow
@@ -94,6 +106,7 @@ class ScalperStrategy(BaseStrategy):
         self.adx_min = adx_min
         self.breakout_lookback = breakout_lookback
         self.roc_period = roc_period
+        self.breakout_grace = breakout_grace
 
     # ------------------------------------------------------------------
     @property
@@ -120,6 +133,18 @@ class ScalperStrategy(BaseStrategy):
         hi = prior["high"].rolling(self.breakout_lookback).max().iloc[-1]
         lo = prior["low"].rolling(self.breakout_lookback).min().iloc[-1]
 
+        # "Recent breakout" — did the close pierce its trailing N-bar extreme on
+        # ANY of the last ``breakout_grace`` closed candles?  Each candle is
+        # compared against the N candles immediately before it (``shift(1)``),
+        # so it's always a genuine new high/low.  This gives the lagging ADX a
+        # few bars to confirm a breakout instead of demanding both on one bar.
+        roll_hi = df["high"].shift(1).rolling(self.breakout_lookback).max()
+        roll_lo = df["low"].shift(1).rolling(self.breakout_lookback).min()
+        broke_up = close >= roll_hi
+        broke_dn = close <= roll_lo
+        recent_up = bool(broke_up.iloc[-self.breakout_grace:].any())
+        recent_dn = bool(broke_dn.iloc[-self.breakout_grace:].any())
+
         return {
             "close": close.iloc[-1],
             "ema_fast": ef.iloc[-1],
@@ -129,6 +154,8 @@ class ScalperStrategy(BaseStrategy):
             "atr": atr_series.iloc[-1],
             "breakout_high": hi,
             "breakout_low": lo,
+            "recent_break_up": recent_up,
+            "recent_break_dn": recent_dn,
             "roc": close.iloc[-1] - close.iloc[-1 - self.roc_period],
         }
 
@@ -158,13 +185,13 @@ class ScalperStrategy(BaseStrategy):
             and uptrend
             and ema_rising
             and s["roc"] > 0
-            and s["close"] >= s["breakout_high"]
+            and s["recent_break_up"]
         ):
             conf = self._confidence(s)
             reason = (
                 f"Micro-trend long: EMA{self.ema_fast}>{self.ema_slow}, "
-                f"ADX={s['adx']:.1f}, close {s['close']:.5f} broke "
-                f"{self.breakout_lookback}-bar high {s['breakout_high']:.5f}"
+                f"ADX={s['adx']:.1f}, close {s['close']:.5f} after recent break "
+                f"of {self.breakout_lookback}-bar high {s['breakout_high']:.5f}"
             )
             logger.info("[%s] %s — %s", self.name, symbol, reason)
             return Signal(
@@ -179,13 +206,13 @@ class ScalperStrategy(BaseStrategy):
             and downtrend
             and ema_falling
             and s["roc"] < 0
-            and s["close"] <= s["breakout_low"]
+            and s["recent_break_dn"]
         ):
             conf = self._confidence(s)
             reason = (
                 f"Micro-trend short: EMA{self.ema_fast}<{self.ema_slow}, "
-                f"ADX={s['adx']:.1f}, close {s['close']:.5f} broke "
-                f"{self.breakout_lookback}-bar low {s['breakout_low']:.5f}"
+                f"ADX={s['adx']:.1f}, close {s['close']:.5f} after recent break "
+                f"of {self.breakout_lookback}-bar low {s['breakout_low']:.5f}"
             )
             logger.info("[%s] %s — %s", self.name, symbol, reason)
             return Signal(
