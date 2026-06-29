@@ -504,6 +504,15 @@ class MultiBotManager:
                 # -- Sync position state (detect externally closed trades) --
                 self._sync_position_state(bot, logger)
 
+                # -- Breakeven: once a trade is in profit, protect it so it
+                #    can't run back to the full stop (fixes the asymmetric
+                #    avg-loss > avg-win pattern that bled the account). --
+                self._apply_breakeven(bot, logger)
+
+                # -- Time-stop: force-close stale positions (kills multi-day
+                #    runaways that never hit SL/TP). --
+                self._apply_time_stop(bot, logger)
+
                 # -- Quick Exit: bank small profit immediately (if enabled) --
                 self._apply_quick_exit(bot, logger)
 
@@ -751,6 +760,7 @@ class MultiBotManager:
                     "tp": pos.tp,
                     "profit": pos.profit,
                     "swap": pos.swap,
+                    "open_time": getattr(pos, "time", 0),
                 })
 
             # Log closed positions (were tracked but no longer open)
@@ -788,6 +798,95 @@ class MultiBotManager:
             logger.debug(
                 "Bot#%d position sync check failed: %s", bot.bot_id, exc,
             )
+
+    def _apply_breakeven(self, bot: BotInstance, logger: logging.Logger) -> None:
+        """Pull a winning trade's stop to breakeven once it's far enough in profit.
+
+        This is the single highest-impact fix from the trade-export analysis.
+        The account bled because losers ran to the **full** stop while winners
+        were banked early — so the realised average loss (≈-$13) was far larger
+        than the average win (≈+$8), turning a 55% win-rate into a net loss.
+
+        Logic: for each open position, compute its risk ``R = |entry - SL|``.
+        Once floating profit reaches ``breakeven_trigger_r × R``, move the stop
+        to entry plus a small ``breakeven_lock_pips`` buffer. A trade that first
+        goes green and then reverses now exits at ≈breakeven instead of a full
+        loss, which collapses the avg-loss and flips expectancy positive.
+
+        Skipped in dry-run (no live position to modify) and once the stop is
+        already at/beyond breakeven (so we don't spam ``modify`` requests).
+        """
+        if bot.dry_run or not getattr(self.config, "breakeven_enabled", True):
+            return
+        if not bot.active_positions:
+            return
+
+        trigger_r = float(getattr(self.config, "breakeven_trigger_r", 0.6))
+        lock_pips = float(getattr(self.config, "breakeven_lock_pips", 1.0))
+        if trigger_r <= 0:
+            return
+
+        for pos in list(bot.active_positions):
+            entry = pos.get("entry", 0.0)
+            sl = pos.get("sl", 0.0)
+            current = pos.get("price_current", 0.0)
+            ticket = pos.get("ticket")
+            ptype = pos.get("type")
+            if not entry or not current or not ticket or not sl:
+                continue
+
+            risk = abs(entry - sl)
+            if risk <= 0:
+                continue
+
+            # Already locked at/beyond breakeven? Nothing to do.
+            if ptype == "BUY" and sl >= entry:
+                continue
+            if ptype == "SELL" and sl <= entry:
+                continue
+
+            profit_price = (current - entry) if ptype == "BUY" else (entry - current)
+            if profit_price >= trigger_r * risk:
+                ok = self.order_mgr.set_breakeven(ticket, offset_pips=lock_pips)
+                if ok:
+                    logger.info(
+                        "Bot#%d breakeven set for #%s at +%.2fR (lock +%.1f pips).",
+                        bot.bot_id, ticket, profit_price / risk, lock_pips,
+                    )
+
+    def _apply_time_stop(self, bot: BotInstance, logger: logging.Logger) -> None:
+        """Force-close positions held longer than ``config.max_trade_hours``.
+
+        The export showed several trades held for days (e.g. a −$76 AUDJPY open
+        for ~6 days, and a −$76 position open ~9,000 minutes). Those are stuck
+        trades that will neither hit SL nor TP and just tie up risk/margin. A
+        hard maximum holding time caps that tail. Disabled when
+        ``max_trade_hours <= 0``; skipped in dry-run.
+        """
+        if bot.dry_run:
+            return
+        max_hours = float(getattr(self.config, "max_trade_hours", 0))
+        if max_hours <= 0 or not bot.active_positions:
+            return
+
+        now = time.time()
+        for pos in list(bot.active_positions):
+            opened = pos.get("open_time", 0)
+            ticket = pos.get("ticket")
+            if not opened or not ticket:
+                continue
+            age_hours = (now - opened) / 3600.0
+            if age_hours >= max_hours:
+                logger.info(
+                    "Bot#%d time-stop closing #%s (held %.1fh ≥ %.1fh limit).",
+                    bot.bot_id, ticket, age_hours, max_hours,
+                )
+                ok = self.order_mgr.close_position(ticket)
+                if not ok:
+                    logger.warning(
+                        "Bot#%d time-stop close failed for #%s — will retry.",
+                        bot.bot_id, ticket,
+                    )
 
     def _apply_quick_exit(self, bot: BotInstance, logger: logging.Logger) -> None:
         """Close any open position the instant it reaches the quick-profit target.

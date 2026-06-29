@@ -143,6 +143,23 @@ class Config:
         self.trade_hour_start: int = int(os.getenv("TRADE_HOUR_START", "0"))
         self.trade_hour_end: int = int(os.getenv("TRADE_HOUR_END", "24"))
 
+        # --- Active trade management: breakeven + time-stop --------------
+        # The export analysis showed the fatal pattern: winners get banked
+        # early (Quick Exit / strategy flip) while losers run to the FULL
+        # stop, so realised avg-loss (-$13) dwarfs avg-win (+$8) even at a
+        # 55% win-rate. Breakeven fixes the asymmetry: once a trade is
+        # ``breakeven_trigger_r`` of its risk (R) in profit, its stop is
+        # pulled to entry (+ a tiny lock), turning would-be full-stop losers
+        # into ~scratch trades. The time-stop force-closes positions that
+        # have been held longer than ``max_trade_hours`` — this kills the
+        # multi-day runaways (e.g. the −$76 AUDJPY held 6 days).
+        self.breakeven_enabled: bool = (
+            os.getenv("BREAKEVEN_ENABLED", "true").lower() in ("true", "1", "yes")
+        )
+        self.breakeven_trigger_r: float = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.6"))
+        self.breakeven_lock_pips: float = float(os.getenv("BREAKEVEN_LOCK_PIPS", "1.0"))
+        self.max_trade_hours: float = float(os.getenv("MAX_TRADE_HOURS", "48"))
+
         # --- Bot settings ------------------------------------------------
         self.magic_number: int = int(os.getenv("MAGIC_NUMBER", "123456"))
         self.dry_run: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")

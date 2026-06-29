@@ -53,7 +53,10 @@ class ScalperStrategy(BaseStrategy):
     adx_period : int
         ADX lookback. Default 14.
     adx_min : float
-        Minimum ADX to allow an entry (chop filter). Default 18.
+        Minimum ADX to allow an entry (chop filter). Default 25. Raised from
+        18 after the live export showed a 45.8% win-rate — most losers were
+        low-ADX chop breakouts that immediately reversed. A stricter gate
+        trades less but only when a real trend thrust is underway.
     breakout_lookback : int
         How many prior candles define the micro-breakout level. Default 8.
     roc_period : int
@@ -70,7 +73,7 @@ class ScalperStrategy(BaseStrategy):
         ema_fast: int = 5,
         ema_slow: int = 20,
         adx_period: int = 14,
-        adx_min: float = 18.0,
+        adx_min: float = 25.0,
         breakout_lookback: int = 8,
         roc_period: int = 3,
         sl_pips: float = 8,
