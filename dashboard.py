@@ -607,11 +607,32 @@ def create_app() -> Flask:
             elif ok:
                 message = f"Closed {closed} position(s)"
             else:
-                # Closes that didn't go through — surface it instead of a
-                # misleading success so the user knows positions remain.
+                # Closes that didn't go through — surface the actual broker
+                # reason so the user knows *why* positions remain open.
+                err = getattr(_order_mgr, "last_close_error", None) or {}
+                reason = err.get("message") or "broker rejected the close"
+                code = err.get("retcode")
+                broker = err.get("comment")
+                # Actionable hints for the codes that block *all* closes — these
+                # are almost always a terminal/account setting, not a bug.
+                _hints = {
+                    10027: "Enable the 'Algo Trading' button in the MT5 terminal "
+                           "(Tools → Options → Expert Advisors → Allow algorithmic trading).",
+                    10018: "Market is closed for this symbol right now.",
+                    10017: "Trading is disabled for this account/symbol.",
+                    10016: "Broker rejected the stops/price — try again.",
+                    10026: "Algo trading is disabled on the broker's server.",
+                }
+                hint = _hints.get(code, "")
+                detail = reason
+                if code is not None:
+                    detail += f" [retcode {code}]"
+                if broker:
+                    detail += f" — '{broker}'"
+                if hint:
+                    detail += f". {hint}"
                 message = (
-                    f"Closed {closed} of {total}; {remaining} still open "
-                    f"(broker rejected the close — check the log)"
+                    f"Closed {closed} of {total}; {remaining} still open: {detail}"
                 )
             return jsonify({
                 "message": message,
@@ -619,6 +640,7 @@ def create_app() -> Flask:
                 "closed": closed,
                 "total": total,
                 "remaining": remaining,
+                "error": (getattr(_order_mgr, "last_close_error", None) if not ok else None),
             }), (200 if ok else 207)
         except Exception as exc:
             logger.error("POST /api/positions/close-all error: %s", exc)

@@ -359,6 +359,11 @@ class OrderManager:
         self.dry_run = dry_run
         self.logger = logging.getLogger("OrderManager")
 
+        # Details of the most recent failed close (retcode/message/broker
+        # comment) so callers/UI can show *why* a close was rejected rather
+        # than a generic failure. ``None`` after any successful close.
+        self.last_close_error: Optional[dict] = None
+
         # -- Tracking / OCO state (thread-safe) ---------------------------
         self._tracked_orders: Dict[str, TrackedOrder] = {}
         self._order_groups: Dict[str, OrderGroup] = {}
@@ -560,6 +565,10 @@ class OrderManager:
         positions = mt5.positions_get(ticket=ticket)
         if positions is None or len(positions) == 0:
             self.logger.warning("Position #%s not found.", ticket)
+            self.last_close_error = {
+                "ticket": ticket, "retcode": None,
+                "message": "Position not found (already closed?)", "comment": "",
+            }
             return False
 
         pos = positions[0]
@@ -574,6 +583,11 @@ class OrderManager:
             self.logger.error(
                 "Cannot get tick for %s while closing #%s", pos.symbol, ticket
             )
+            self.last_close_error = {
+                "ticket": ticket, "retcode": None,
+                "message": f"No price tick for {pos.symbol} "
+                           f"(symbol not in Market Watch?)", "comment": "",
+            }
             return False
 
         price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
@@ -617,6 +631,7 @@ class OrderManager:
             last_result = result
             if result.retcode == mt5.TRADE_RETCODE_DONE:
                 self.logger.info("✔ Position #%s closed successfully.", ticket)
+                self.last_close_error = None
                 return True
 
             # Only worth retrying when the failure is filling-mode related;
@@ -631,12 +646,28 @@ class OrderManager:
             )
 
         if last_result is not None:
+            reason = self.get_retcode_message(last_result.retcode)
+            broker_comment = (getattr(last_result, "comment", "") or "").strip()
+            self.last_close_error = {
+                "ticket": ticket,
+                "retcode": last_result.retcode,
+                "message": reason,
+                "comment": broker_comment,
+            }
             self.logger.warning(
-                "✘ Failed to close #%s — retcode=%s (%s)",
+                "✘ Failed to close #%s — retcode=%s (%s)%s",
                 ticket,
                 last_result.retcode,
-                self.get_retcode_message(last_result.retcode),
+                reason,
+                f" broker='{broker_comment}'" if broker_comment else "",
             )
+        else:
+            self.last_close_error = {
+                "ticket": ticket,
+                "retcode": None,
+                "message": "order_send returned None (no broker response)",
+                "comment": "",
+            }
         return False
 
     # ------------------------------------------------------------------
