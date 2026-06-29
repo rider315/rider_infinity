@@ -95,12 +95,26 @@ class MT5Connector:
         # toggled. The path makes it obvious which terminal to fix.
         status = self.terminal_status()
         if not status.get("trade_allowed", False):
+            data_path = str(status.get("data_path", "") or "")
+            is_system = (
+                "systemprofile" in data_path.lower()
+                or "system32" in data_path.lower()
+            )
+            extra = ""
+            if is_system:
+                extra = (
+                    " This terminal runs under the Windows SYSTEM account "
+                    "(a service, Session 0) — it has NO visible window, so "
+                    "Algo Trading can't be toggled there. Run the dashboard "
+                    "from an interactive Administrator session instead, after "
+                    "enabling Algo Trading in the Administrator's MT5 terminal."
+                )
             logger.warning(
                 "⚠ Algo Trading is DISABLED in the terminal this session is "
                 "bound to (path=%s, data_path=%s). Orders (incl. Close All) "
                 "will be rejected with retcode 10027 until you enable "
-                "'Algo Trading' in THAT terminal instance.",
-                status.get("path", "?"), status.get("data_path", "?"),
+                "'Algo Trading' in THAT terminal instance.%s",
+                status.get("path", "?"), status.get("data_path", "?"), extra,
             )
         else:
             logger.info(

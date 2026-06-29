@@ -631,12 +631,20 @@ def create_app() -> Flask:
                     try:
                         ts = _connector.terminal_status()
                         if not ts.get("trade_allowed", False):
-                            hint += (
-                                f" NOTE: orders are sent through the terminal at "
-                                f"'{ts.get('data_path') or ts.get('path')}'. Enable "
-                                f"Algo Trading in THAT instance (it may differ from "
-                                f"a window you opened manually)."
-                            )
+                            dp = str(ts.get("data_path") or ts.get("path") or "")
+                            if "systemprofile" in dp.lower() or "system32" in dp.lower():
+                                hint += (
+                                    " The dashboard is running as a Windows "
+                                    "SERVICE/SYSTEM account, so its MT5 terminal "
+                                    "has no clickable window. Run the dashboard "
+                                    "from an interactive Administrator session "
+                                    "(where you can enable Algo Trading in MT5)."
+                                )
+                            else:
+                                hint += (
+                                    f" NOTE: orders are sent through the terminal at "
+                                    f"'{dp}'. Enable Algo Trading in THAT instance."
+                                )
                     except Exception:
                         pass
                 detail = reason
