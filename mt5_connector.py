@@ -86,6 +86,25 @@ class MT5Connector:
         else:
             logger.warning("Connected but could not retrieve account info.")
 
+        # Surface the Algo-Trading permission of THIS terminal instance up
+        # front. retcode 10027 on every order means this is False — and on a
+        # server the instance the API bound to may not be the window a person
+        # toggled. The path makes it obvious which terminal to fix.
+        status = self.terminal_status()
+        if not status.get("trade_allowed", False):
+            logger.warning(
+                "⚠ Algo Trading is DISABLED in the terminal this session is "
+                "bound to (path=%s, data_path=%s). Orders (incl. Close All) "
+                "will be rejected with retcode 10027 until you enable "
+                "'Algo Trading' in THAT terminal instance.",
+                status.get("path", "?"), status.get("data_path", "?"),
+            )
+        else:
+            logger.info(
+                "Algo Trading is ENABLED (terminal build %s, path=%s).",
+                status.get("build", "?"), status.get("path", "?"),
+            )
+
         return True
 
     def disconnect(self) -> None:
@@ -106,6 +125,31 @@ class MT5Connector:
         logger.info("Attempting reconnection …")
         self.disconnect()
         return self.connect()
+
+    def terminal_status(self) -> dict:
+        """Return the live trading-permission state of the attached terminal.
+
+        ``trade_allowed`` is the single most important field: it is ``True``
+        only when the 'Algo Trading' switch is ON **in the exact terminal
+        instance this Python session is bound to**. On a server, ``initialize``
+        can launch its *own* terminal instance (separate from any one a person
+        opened interactively), so toggling Algo Trading in a visible window has
+        no effect on the instance that actually sends orders. ``path`` /
+        ``data_path`` identify which instance that is, so the right one can be
+        fixed.
+        """
+        info = mt5.terminal_info()
+        if info is None:
+            return {"connected": False, "trade_allowed": False}
+        return {
+            "connected": bool(getattr(info, "connected", False)),
+            "trade_allowed": bool(getattr(info, "trade_allowed", False)),
+            "trade_expert": bool(getattr(info, "trade_expert", False)),
+            "path": getattr(info, "path", ""),
+            "data_path": getattr(info, "data_path", ""),
+            "name": getattr(info, "name", ""),
+            "build": getattr(info, "build", 0),
+        }
 
     def is_connected(self) -> bool:
         """Check whether the terminal is still reachable.

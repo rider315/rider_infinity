@@ -624,6 +624,21 @@ def create_app() -> Flask:
                     10026: "Algo trading is disabled on the broker's server.",
                 }
                 hint = _hints.get(code, "")
+                # For the Algo-Trading block, name the EXACT terminal instance
+                # the API is bound to — on a server it's often a different one
+                # than the window the user toggled.
+                if code == 10027 and _connector is not None:
+                    try:
+                        ts = _connector.terminal_status()
+                        if not ts.get("trade_allowed", False):
+                            hint += (
+                                f" NOTE: orders are sent through the terminal at "
+                                f"'{ts.get('data_path') or ts.get('path')}'. Enable "
+                                f"Algo Trading in THAT instance (it may differ from "
+                                f"a window you opened manually)."
+                            )
+                    except Exception:
+                        pass
                 detail = reason
                 if code is not None:
                     detail += f" [retcode {code}]"
