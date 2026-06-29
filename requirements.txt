@@ -1,6 +1,5 @@
 MetaTrader5
 pandas
-pandas-ta
 numpy
 python-dotenv
 colorama
