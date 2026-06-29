@@ -394,6 +394,30 @@ class OrderManager:
         else:
             return mt5.ORDER_FILLING_RETURN
 
+    @staticmethod
+    def _filling_candidates(symbol: str) -> list[int]:
+        """Ordered filling modes to try, preferred first then fallbacks.
+
+        Closing a position can fail when a broker rejects the auto-detected
+        filling mode. Returning every distinct mode (preferred one first) lets
+        the caller retry until one is accepted, so a mismatch never leaves a
+        position open.
+        """
+        preferred = OrderManager._get_filling_type(symbol)
+        order = [preferred] + [
+            mt5.ORDER_FILLING_IOC,
+            mt5.ORDER_FILLING_FOK,
+            mt5.ORDER_FILLING_RETURN,
+        ]
+        # De-duplicate while preserving order.
+        seen: set[int] = set()
+        candidates: list[int] = []
+        for ft in order:
+            if ft not in seen:
+                seen.add(ft)
+                candidates.append(ft)
+        return candidates
+
     # ------------------------------------------------------------------
     # Open position
     # ------------------------------------------------------------------
@@ -554,20 +578,6 @@ class OrderManager:
 
         price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
 
-        request: dict = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": pos.symbol,
-            "volume": pos.volume,
-            "type": close_type,
-            "position": ticket,
-            "price": price,
-            "deviation": 20,
-            "magic": self.config.magic_number,
-            "comment": "close",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": self._get_filling_type(pos.symbol),
-        }
-
         self.logger.info(
             "Closing position #%s (%s %.2f lots) @ %.5f",
             ticket,
@@ -576,23 +586,57 @@ class OrderManager:
             price,
         )
 
-        result = mt5.order_send(request)
-        if result is None:
-            self.logger.error(
-                "Close order_send returned None: %s", mt5.last_error()
+        # Some brokers (incl. MetaQuotes-Demo) reject the auto-detected filling
+        # mode when closing a market position, returning retcode 10030
+        # (Unsupported/Invalid filling). The order then silently fails to close.
+        # Try the preferred mode first, then fall back through the others so a
+        # filling-mode mismatch can never leave a position stuck open.
+        last_result = None
+        for fill_type in self._filling_candidates(pos.symbol):
+            request: dict = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": pos.symbol,
+                "volume": pos.volume,
+                "type": close_type,
+                "position": ticket,
+                "price": price,
+                "deviation": 20,
+                "magic": self.config.magic_number,
+                "comment": "close",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": fill_type,
+            }
+
+            result = mt5.order_send(request)
+            if result is None:
+                self.logger.error(
+                    "Close order_send returned None: %s", mt5.last_error()
+                )
+                continue
+
+            last_result = result
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                self.logger.info("✔ Position #%s closed successfully.", ticket)
+                return True
+
+            # Only worth retrying when the failure is filling-mode related;
+            # for other retcodes (e.g. market closed) retrying won't help.
+            if result.retcode != getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030):
+                break
+
+            self.logger.warning(
+                "Close #%s rejected with filling=%s (retcode=%s) — retrying "
+                "with next filling mode.",
+                ticket, fill_type, result.retcode,
             )
-            return False
 
-        if result.retcode == mt5.TRADE_RETCODE_DONE:
-            self.logger.info("✔ Position #%s closed successfully.", ticket)
-            return True
-
-        self.logger.warning(
-            "✘ Failed to close #%s — retcode=%s (%s)",
-            ticket,
-            result.retcode,
-            self.get_retcode_message(result.retcode),
-        )
+        if last_result is not None:
+            self.logger.warning(
+                "✘ Failed to close #%s — retcode=%s (%s)",
+                ticket,
+                last_result.retcode,
+                self.get_retcode_message(last_result.retcode),
+            )
         return False
 
     # ------------------------------------------------------------------

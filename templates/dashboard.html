@@ -3408,8 +3408,10 @@ table.journal-table td {
     );
     if (!ok) return;
     try {
-      await api('/api/positions/close-all', { method: 'POST' });
-      toast('All positions closed', 'success');
+      const res = await api('/api/positions/close-all', { method: 'POST' });
+      // Report the real outcome — earlier this always said "closed" even when
+      // the broker rejected the close and positions remained open.
+      toast(res.message || 'Done', res.ok ? 'success' : 'error');
       fetchPositions();
     } catch (err) { toast(`Failed: ${err.message}`, 'error'); }
   });

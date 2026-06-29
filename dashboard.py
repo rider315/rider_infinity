@@ -595,13 +595,31 @@ def create_app() -> Flask:
 
     @app.route("/api/positions/close-all", methods=["POST"])
     def api_close_all_positions():
-        """Close every open position."""
+        """Close every open position and report exactly how many actually closed."""
         try:
+            before = _order_mgr.get_open_positions() or []
+            total = len(before)
             closed = _order_mgr.close_all_positions()
+            remaining = total - closed
+            ok = remaining == 0
+            if total == 0:
+                message = "No open positions to close"
+            elif ok:
+                message = f"Closed {closed} position(s)"
+            else:
+                # Closes that didn't go through — surface it instead of a
+                # misleading success so the user knows positions remain.
+                message = (
+                    f"Closed {closed} of {total}; {remaining} still open "
+                    f"(broker rejected the close — check the log)"
+                )
             return jsonify({
-                "message": f"Closed {closed} position(s)",
+                "message": message,
+                "ok": ok,
                 "closed": closed,
-            })
+                "total": total,
+                "remaining": remaining,
+            }), (200 if ok else 207)
         except Exception as exc:
             logger.error("POST /api/positions/close-all error: %s", exc)
             return jsonify({"error": str(exc)}), 500
