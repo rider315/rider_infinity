@@ -767,14 +767,54 @@ def create_app() -> Flask:
                 })
             else:
                 msg = OrderManager.get_retcode_message(retcode)
+                # Show which terminal instance actually handled (and rejected)
+                # this order, plus its live Algo-Trading state. This proves
+                # whether the API is bound to the same terminal you're toggling.
+                term = {}
+                try:
+                    term = _connector.terminal_status()
+                except Exception:
+                    pass
+                err = f"Order failed: {msg}"
+                if retcode == 10027:
+                    dp = str(term.get("data_path") or term.get("path") or "?")
+                    err += (
+                        f" | API is bound to terminal data_path='{dp}', "
+                        f"trade_allowed={term.get('trade_allowed')}. Enable Algo "
+                        f"Trading in THIS exact terminal (not another window on "
+                        f"the same account)."
+                    )
+                    if "systemprofile" in dp.lower() or "system32" in dp.lower():
+                        err += (
+                            " This path is the Windows SYSTEM account — a "
+                            "headless service terminal with no window. Kill it "
+                            "(taskkill /F /IM terminal64.exe), stop the service, "
+                            "and run the dashboard interactively."
+                        )
                 return jsonify({
-                    "error": f"Order failed: {msg}",
+                    "error": err,
                     "retcode": retcode,
+                    "terminal": term,
                     **result_info,
                 }), 400
 
         except Exception as exc:
             logger.error("POST /api/test-trade error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/terminal-status", methods=["GET"])
+    def api_terminal_status():
+        """Report the MT5 terminal the API is bound to and its trade permission.
+
+        Use this to confirm whether order_send will be accepted: ``trade_allowed``
+        must be True, and ``data_path`` must be the terminal you actually control
+        (not a headless SYSTEM-account instance).
+        """
+        try:
+            status = _connector.terminal_status()
+            return jsonify(status)
+        except Exception as exc:
+            logger.error("GET /api/terminal-status error: %s", exc)
             return jsonify({"error": str(exc)}), 500
 
     # ==================================================================
