@@ -1083,7 +1083,11 @@ def create_app() -> Flask:
         nonlocal _backtest_engine
         if _backtest_engine is None:
             from backtester import BacktestEngine
-            _backtest_engine = BacktestEngine(_config)
+            # Pass the live connector so the engine can resolve broker symbol
+            # suffixes (GBPJPY → GBPJPY.r …) and enable the symbol in Market
+            # Watch before pulling history — otherwise copy_rates_range fails
+            # with (-2, 'Invalid params').
+            _backtest_engine = BacktestEngine(_config, _connector)
         return _backtest_engine
 
     @app.route("/api/backtest/run", methods=["POST"])

@@ -576,9 +576,14 @@ class BacktestEngine:
     _active_runs: dict[str, BacktestResult] = {}
     _lock = threading.Lock()
 
-    def __init__(self, config: Config | None = None):
+    def __init__(self, config: Config | None = None, connector=None):
         self.config = config or Config()
         self.db = BacktestDB()
+        # Optional MT5Connector — used to resolve broker symbol suffixes and
+        # make the symbol visible in Market Watch before pulling history.
+        # Without this, copy_rates_range on a raw/canonical name (e.g. the
+        # broker calls it "GBPJPY.r") fails with (-2, 'Invalid params').
+        self.connector = connector
 
     def run_async(
         self,
@@ -693,7 +698,28 @@ class BacktestEngine:
         # reverted). 0 / absent = no time-stop (unchanged behaviour).
         max_hold_bars = int(getattr(strategy, "max_hold_bars", 0) or 0)
 
-        # ── 2. Fetch historical data ─────────────────────────────────
+        # ── 2. Resolve the broker's real symbol name & enable it ─────
+        # Brokers decorate instruments with prefixes/suffixes (GBPJPY →
+        # GBPJPY.r, GBPJPYm …) and copy_rates_range fails with
+        # (-2, 'Invalid params') if the symbol isn't the exact broker name
+        # or isn't selected in Market Watch. Reuse the connector's resolver
+        # (same path live trading uses) so backtests accept canonical names.
+        broker_symbol = result.symbol
+        if self.connector is not None:
+            resolved = self.connector.ensure_symbol(result.symbol)
+            if resolved is None:
+                raise ValueError(
+                    f"Symbol '{result.symbol}' is not available on the "
+                    f"connected broker (checked common prefixes/suffixes). "
+                    f"Open it in MT5 Market Watch or verify the name."
+                )
+            broker_symbol = resolved
+        else:
+            # No connector (e.g. standalone script) — at least make the
+            # symbol visible so copy_rates_range doesn't fail on selection.
+            mt5.symbol_select(result.symbol, True)
+
+        # ── 3. Fetch historical data ─────────────────────────────────
         date_from = datetime.fromisoformat(result.date_from).replace(
             tzinfo=timezone.utc
         )
@@ -702,13 +728,16 @@ class BacktestEngine:
         )
 
         rates = mt5.copy_rates_range(
-            result.symbol, mt5_tf, date_from, date_to,
+            broker_symbol, mt5_tf, date_from, date_to,
         )
         if rates is None or len(rates) == 0:
             raise ValueError(
-                f"No historical data for {result.symbol} {result.timeframe} "
+                f"No historical data for {broker_symbol} {result.timeframe} "
                 f"from {result.date_from} to {result.date_to}. "
-                f"MT5 error: {mt5.last_error()}"
+                f"MT5 error: {mt5.last_error()}. On low timeframes like "
+                f"{result.timeframe}, MetaTrader may not hold history this far "
+                f"back — open the symbol's chart on this timeframe and scroll "
+                f"back to force the terminal to download bars, then retry."
             )
 
         df = pd.DataFrame(rates)
@@ -719,10 +748,10 @@ class BacktestEngine:
         total_bars = len(df)
         logger.info("Fetched %d bars for backtest.", total_bars)
 
-        # ── 3. Get symbol info for pip calculations ──────────────────
-        sym_info = mt5.symbol_info(result.symbol)
+        # ── 4. Get symbol info for pip calculations ──────────────────
+        sym_info = mt5.symbol_info(broker_symbol)
         if sym_info is None:
-            raise ValueError(f"Cannot get symbol info for {result.symbol}")
+            raise ValueError(f"Cannot get symbol info for {broker_symbol}")
         point = sym_info.point
         digits = sym_info.digits
         # Accurate pip value in account currency for 1.0 lot, derived from the
@@ -747,7 +776,7 @@ class BacktestEngine:
         if point > 0 and getattr(sym_info, "spread", 0):
             spread_pips = sym_info.spread / pip_points  # spread is in points
 
-        # ── 4. Walk bar-by-bar ───────────────────────────────────────
+        # ── 5. Walk bar-by-bar ───────────────────────────────────────
         WARMUP = min(200, total_bars // 3)  # indicator warm-up period
         equity = result.initial_balance
         open_trades: list[dict] = []  # active simulated positions
@@ -760,7 +789,7 @@ class BacktestEngine:
             bar = df.iloc[i]
             bar_time = bar["time"].isoformat()
 
-            # ── 4a. Execute pending signal at this bar's open ────────
+            # ── 5a. Execute pending signal at this bar's open ────────
             if pending_signal is not None:
                 sig = pending_signal
                 pending_signal = None
@@ -803,7 +832,7 @@ class BacktestEngine:
                         "reason": sig.reason[:200] if sig.reason else "",
                     })
 
-            # ── 4b. Check SL/TP for all open trades ─────────────────
+            # ── 5b. Check SL/TP for all open trades ─────────────────
             still_open = []
             for trade in open_trades:
                 hit = self._check_sl_tp(trade, bar, point, result.symbol)
@@ -841,7 +870,7 @@ class BacktestEngine:
                     still_open.append(trade)
             open_trades = still_open
 
-            # ── 4c. Run strategy on current window ───────────────────
+            # ── 5c. Run strategy on current window ───────────────────
             window = df.iloc[max(0, i - 499):i + 1].copy()
             window = window.reset_index(drop=True)
 
@@ -853,7 +882,7 @@ class BacktestEngine:
             if signal and signal.action in (SignalAction.BUY, SignalAction.SELL):
                 pending_signal = signal  # will execute on next bar's open
 
-            # ── 4d. Record equity ────────────────────────────────────
+            # ── 5d. Record equity ────────────────────────────────────
             # Include unrealised P&L from open trades
             unrealised = 0.0
             for trade in open_trades:
@@ -868,10 +897,10 @@ class BacktestEngine:
                 "equity": round(equity + unrealised, 2),
             })
 
-            # ── 4e. Update progress ──────────────────────────────────
+            # ── 5e. Update progress ──────────────────────────────────
             result.progress = (i - WARMUP) / max(1, total_bars - WARMUP)
 
-        # ── 5. Close any remaining open trades at final bar ──────────
+        # ── 6. Close any remaining open trades at final bar ──────────
         if open_trades:
             final_bar = df.iloc[-1]
             final_time = final_bar["time"].isoformat()
@@ -901,7 +930,7 @@ class BacktestEngine:
                     signal_reason=trade["reason"],
                 ))
 
-        # ── 6. Compute metrics and save ──────────────────────────────
+        # ── 7. Compute metrics and save ──────────────────────────────
         result.trades = closed_trades
         result.equity_curve = equity_curve
         result.compute_metrics()
