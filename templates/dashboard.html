@@ -1742,6 +1742,36 @@ table.journal-table td {
       </div>
     </div>
 
+    <!-- ⚙️ Position Limits -->
+    <div class="card anim-fade-in anim-delay-2" style="border:1px solid rgba(90,160,255,0.18);">
+      <div class="card-header">
+        <div class="card-title"><span class="icon">⚙️</span> Position Limits</div>
+      </div>
+      <div class="card-body">
+        <div style="font-size:.75rem;color:var(--text-muted);margin-bottom:.75rem;">
+          How many trades may be open at once. Applies instantly and is saved
+          (survives restarts). Raising <b>Per Bot</b> clears the
+          “Per-bot limit reached” block.
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.6rem;">
+          <div>
+            <label style="font-size:.7rem;color:var(--text-dim);display:block;margin-bottom:.2rem;">Per Bot</label>
+            <input id="limPerBot" type="number" class="form-control" min="1" max="100" step="1" style="font-size:.8rem;padding:.35rem .5rem;">
+          </div>
+          <div>
+            <label style="font-size:.7rem;color:var(--text-dim);display:block;margin-bottom:.2rem;">Fleet (account-wide)</label>
+            <input id="limFleet" type="number" class="form-control" min="1" max="500" step="1" style="font-size:.8rem;padding:.35rem .5rem;">
+          </div>
+        </div>
+        <button class="btn btn-sm" id="limSave" style="width:100%;background:#3b82f6;color:#fff;font-weight:700;font-size:.8rem;padding:.4rem;">
+          Save Limits
+        </button>
+        <div id="limResult" style="font-size:.72rem;color:var(--text-dim);min-height:1.2rem;margin-top:.5rem;padding:.4rem;border-radius:var(--radius-xs);background:rgba(255,255,255,.03);">
+          Loading current limits…
+        </div>
+      </div>
+    </div>
+
     <!-- Open Positions -->
     <div class="card anim-fade-in anim-delay-3">
       <div class="card-header">
@@ -3685,6 +3715,47 @@ table.journal-table td {
 
   document.getElementById('testBuy').addEventListener('click', () => fireTestTrade('BUY'));
   document.getElementById('testSell').addEventListener('click', () => fireTestTrade('SELL'));
+
+  /* ── Position Limits (per-bot / fleet) ── */
+  async function loadLimits() {
+    const out = document.getElementById('limResult');
+    try {
+      const d = await api('/api/limits');
+      document.getElementById('limPerBot').value = d.max_positions_per_bot;
+      document.getElementById('limFleet').value = d.max_open_positions;
+      if (out) {
+        out.style.color = 'var(--text-dim)';
+        out.textContent = `Current: ${d.max_positions_per_bot} per bot · ${d.max_open_positions} fleet.`;
+      }
+    } catch (err) {
+      if (out) { out.style.color = 'var(--red)'; out.textContent = `❌ ${err.message}`; }
+    }
+  }
+
+  async function saveLimits() {
+    const out = document.getElementById('limResult');
+    const perBot = parseInt(document.getElementById('limPerBot').value, 10);
+    const fleet = parseInt(document.getElementById('limFleet').value, 10);
+    out.style.color = 'var(--yellow)';
+    out.textContent = '⏳ Saving…';
+    try {
+      const d = await api('/api/limits', {
+        method: 'POST',
+        body: JSON.stringify({ max_positions_per_bot: perBot, max_open_positions: fleet }),
+      });
+      out.style.color = 'var(--green)';
+      out.innerHTML = `✅ ${d.message}` +
+        (d.warning ? `<br><span style="color:var(--yellow);">⚠ ${d.warning}</span>` : '');
+      toast(d.message, 'success');
+    } catch (err) {
+      out.style.color = 'var(--red)';
+      out.textContent = `❌ ${err.message}`;
+      toast(`Save failed: ${err.message}`, 'error');
+    }
+  }
+
+  document.getElementById('limSave').addEventListener('click', saveLimits);
+  loadLimits();
 
   /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€─
      DATA FETCHERS

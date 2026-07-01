@@ -820,6 +820,83 @@ def create_app() -> Flask:
             logger.error("GET /api/terminal-status error: %s", exc)
             return jsonify({"error": str(exc)}), 500
 
+    @app.route("/api/limits", methods=["GET", "POST"])
+    def api_limits():
+        """Get or set the position limits that gate new trades.
+
+        ``max_positions_per_bot`` — how many simultaneous positions a single
+        bot may hold (the "Per-bot limit reached (n/N open)" block).
+        ``max_open_positions`` — the account-wide safety ceiling across the
+        whole fleet.
+
+        Changes apply immediately to the live, shared Config object (no
+        restart) and are persisted to ``.env`` so they survive a restart.
+
+        GET  -> current values.
+        POST body: ``{"max_positions_per_bot": int, "max_open_positions": int}``
+        """
+        if request.method == "GET":
+            return jsonify({
+                "max_positions_per_bot": _config.max_positions_per_bot,
+                "max_open_positions": _config.max_open_positions,
+            })
+
+        # -- POST: validate --------------------------------------------------
+        try:
+            data = request.get_json(force=True) or {}
+            per_bot = int(data.get("max_positions_per_bot",
+                                   _config.max_positions_per_bot))
+            fleet = int(data.get("max_open_positions",
+                                 _config.max_open_positions))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Limits must be whole numbers."}), 400
+
+        if not 1 <= per_bot <= 100:
+            return jsonify({"error": "Per-bot limit must be between 1 and 100."}), 400
+        if not 1 <= fleet <= 500:
+            return jsonify({"error": "Fleet limit must be between 1 and 500."}), 400
+
+        # -- Apply live (shared Config -> manager + risk manager) ------------
+        _config.max_positions_per_bot = per_bot
+        _config.max_open_positions = fleet
+
+        # -- Persist to .env so it survives restarts -------------------------
+        persisted = True
+        try:
+            from dotenv import set_key
+            env_path = str(Path(__file__).resolve().parent / ".env")
+            set_key(env_path, "MAX_POSITIONS_PER_BOT", str(per_bot))
+            set_key(env_path, "MAX_OPEN_POSITIONS", str(fleet))
+        except Exception as exc:
+            persisted = False
+            logger.warning("Could not persist limits to .env: %s", exc)
+
+        # -- Warn if the fleet ceiling can starve the running bots -----------
+        warning = None
+        try:
+            n_bots = len(_bot_mgr.get_all_bots()) if _bot_mgr else 0
+            if n_bots and fleet < n_bots * per_bot:
+                warning = (
+                    f"Fleet cap {fleet} is below {n_bots} bots × {per_bot} "
+                    f"per-bot ({n_bots * per_bot}). Some bots may be starved — "
+                    f"raise the fleet limit to at least {n_bots * per_bot}."
+                )
+        except Exception:
+            pass
+
+        logger.info(
+            "Limits updated via UI: per_bot=%d fleet=%d (persisted=%s)",
+            per_bot, fleet, persisted,
+        )
+        return jsonify({
+            "message": "Limits saved." if persisted
+            else "Applied live, but .env write failed (will reset on restart).",
+            "max_positions_per_bot": per_bot,
+            "max_open_positions": fleet,
+            "persisted": persisted,
+            "warning": warning,
+        })
+
     # ==================================================================
     #  News Intelligence API endpoints
     # ==================================================================
