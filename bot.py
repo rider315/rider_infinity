@@ -558,9 +558,11 @@ class RiderInfinityBot:
             return
 
         assert self.connector is not None
-        if not self.connector.ensure_symbol(self.symbol):
+        resolved = self.connector.ensure_symbol(self.symbol)
+        if not resolved:
             print(f"  {Fore.RED}✘ Symbol {self.symbol} not available.{Style.RESET_ALL}")
             return
+        self.symbol = resolved
 
         # --- Resolve the strategy instance ---------------------------------
         try:

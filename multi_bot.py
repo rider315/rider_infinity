@@ -199,11 +199,14 @@ class MultiBotManager:
         if bot.status == BotStatus.RUNNING:
             return True  # already running
 
-        # Ensure symbol is available
-        if not self.connector.ensure_symbol(bot.symbol):
+        # Ensure symbol is available (resolves broker suffixes) and adopt
+        # the broker's real name so ticks/orders target the right symbol.
+        resolved = self.connector.ensure_symbol(bot.symbol)
+        if not resolved:
             bot.status = BotStatus.ERROR
             bot.error_msg = f"Symbol {bot.symbol} not available"
             return False
+        bot.symbol = resolved
 
         # Load strategy
         try:
@@ -603,9 +606,13 @@ class MultiBotManager:
         # Symbol metadata (needed for volatility-based stops & pip conversion).
         tick = self.market_data.get_tick(symbol)
         if tick is None:
+            bot.blocked_reason = f"No live tick for {symbol} (symbol not in Market Watch / feed down)"
+            logger.warning("Bot#%d trade skipped: %s", bot.bot_id, bot.blocked_reason)
             return
         sym_info = self.market_data.get_symbol_info(symbol)
         if sym_info is None:
+            bot.blocked_reason = f"No symbol info for {symbol}"
+            logger.warning("Bot#%d trade skipped: %s", bot.bot_id, bot.blocked_reason)
             return
         point = sym_info["point"]
         digits = sym_info["digits"]
@@ -733,8 +740,17 @@ class MultiBotManager:
                     confidence=signal.confidence,
                 )
         else:
-            msg = OrderManager.get_retcode_message(result.get("retcode", -1))
-            logger.error("Bot#%d order failed: %s", bot.bot_id, msg)
+            retcode = result.get("retcode", -1)
+            msg = OrderManager.get_retcode_message(retcode)
+            # Surface the broker rejection on the dashboard instead of failing
+            # silently — otherwise the bot shows a BUY/SELL signal with no trade
+            # and no visible reason. Include the broker's own comment when present.
+            broker_note = result.get("comment") or ""
+            bot.blocked_reason = (
+                f"Order rejected ({retcode}): {msg}"
+                + (f" — {broker_note}" if broker_note and broker_note not in msg else "")
+            )
+            logger.error("Bot#%d order failed: %s", bot.bot_id, bot.blocked_reason)
 
     def _sync_position_state(self, bot: BotInstance, logger: logging.Logger) -> None:
         """Sync the bot's active positions from MT5.

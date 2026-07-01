@@ -691,9 +691,12 @@ def create_app() -> Flask:
             lot = float(data.get("lot", 0.01))
             dry_run = bool(data.get("dry_run", True))
 
-            # Ensure symbol is available
-            if not _connector.ensure_symbol(symbol):
+            # Ensure symbol is available (resolves broker suffixes,
+            # e.g. EURUSD -> EURUSD.a / EURUSDm), then use the real name.
+            resolved = _connector.ensure_symbol(symbol)
+            if not resolved:
                 return jsonify({"error": f"Symbol {symbol} not available"}), 400
+            symbol = resolved
 
             # Get tick and symbol info
             tick = _market_data.get_tick(symbol)

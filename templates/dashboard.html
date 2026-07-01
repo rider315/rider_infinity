@@ -1448,6 +1448,16 @@ table.journal-table td {
 <body>
 
 <!-- ═══════════════════════════════════════════════════════════════════
+     GLOBAL ALERT — Algo Trading disabled (orders silently rejected)
+     ═══════════════════════════════════════════════════════════════════ -->
+<div id="algoBanner" style="display:none;background:linear-gradient(90deg,#c0392b,#e74c3c);color:#fff;
+     padding:.6rem 1rem;font-size:.82rem;line-height:1.35;font-weight:600;text-align:center;
+     box-shadow:0 2px 8px rgba(0,0,0,.35);position:sticky;top:0;z-index:9999;">
+  <span style="font-size:1rem;margin-right:.4rem;">⛔</span>
+  <span id="algoBannerText">Algo Trading is DISABLED — orders are being rejected by the terminal.</span>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════
      TOP BAR
      ═══════════════════════════════════════════════════════════════════ -->
 <header class="topbar">
@@ -3701,6 +3711,31 @@ table.journal-table td {
     } catch (e) {}
   }
 
+  // Poll the bound MT5 terminal's trade permission. If Algo Trading is off,
+  // every order is rejected (retcode 10027) and bots show signals but no
+  // trades — surface that loudly instead of failing silently.
+  async function fetchTerminalStatus() {
+    const banner = document.getElementById('algoBanner');
+    const text = document.getElementById('algoBannerText');
+    if (!banner) return;
+    try {
+      const st = await api('/api/terminal-status');
+      if (st && st.connected && st.trade_allowed === false) {
+        const dp = st.data_path || st.path || '';
+        text.innerHTML =
+          'Algo Trading is <u>DISABLED</u> in the MT5 terminal — orders are being rejected '
+          + '(retcode 10027). Click the <b>“Algo Trading”</b> button in MT5 '
+          + '(or Tools → Options → Expert Advisors → “Allow algorithmic trading”) to enable it.'
+          + (dp ? ' <span style="opacity:.85;font-weight:400;">[terminal: ' + dp + ']</span>' : '');
+        banner.style.display = 'block';
+      } else {
+        banner.style.display = 'none';
+      }
+    } catch (e) {
+      // Endpoint unreachable — leave banner as-is rather than flapping.
+    }
+  }
+
   async function fetchPositions() {
     try {
       state.positions = await api('/api/positions');
@@ -4004,6 +4039,10 @@ table.journal-table td {
     setInterval(() => {
       if (state.historyVisible) fetchBotHistory();
     }, 30000);
+
+    // Terminal Algo-Trading permission (10s) — drives the global ⛔ banner.
+    fetchTerminalStatus();
+    setInterval(fetchTerminalStatus, 10000);
 
     // UTC clock every second
     setInterval(() => {

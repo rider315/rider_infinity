@@ -227,37 +227,127 @@ class MT5Connector:
 
     # ── Symbol management ────────────────────────────────────────────────
 
-    def ensure_symbol(self, symbol: str) -> bool:
-        """Make sure a symbol is visible in Market Watch.
+    # Broker suffixes that appear WITHOUT a separator, e.g. "EURUSDm"
+    # (micro) or "EURUSDc" (cent).  Kept deliberately small so we never
+    # mistake a *different* instrument (e.g. "EURUSDT" Tether) for a
+    # suffixed major.
+    _KNOWN_SUFFIXES: tuple[str, ...] = (
+        "MICRO", "CENT", "PRO", "ECN", "RAW", "STP", "M", "C", "Z",
+    )
+    _SEPARATORS: str = ".-_# "
+
+    def resolve_symbol(self, symbol: str) -> Optional[str]:
+        """Resolve a canonical ticker to the broker's actual symbol name.
+
+        Brokers frequently decorate standard instruments with a prefix or
+        suffix (``EURUSD`` → ``EURUSD.a``, ``EURUSDm``, ``EURUSD-ECN`` …),
+        so a literal lookup of ``EURUSD`` fails even though the pair is
+        tradable.  Callers can therefore pass the canonical name and let
+        this map it onto whatever the connected server actually calls it.
+
+        Resolution order (first hit wins):
+          1. Exact match — fast path.
+          2. ``<base><separator>…``   e.g. ``EURUSD.a``, ``EURUSD-ECN``.
+          3. ``…<separator><base>``   e.g. ``m.EURUSD``.
+          4. ``<base><known-suffix>`` e.g. ``EURUSDm`` (no separator).
+
+        Returns the broker symbol name, or ``None`` if nothing matches
+        (which also covers the "terminal not logged in" case).
+        """
+        # 1. Exact match — nothing to translate.
+        if mt5.symbol_info(symbol) is not None:
+            return symbol
+
+        all_syms = mt5.symbols_get()
+        if not all_syms:
+            error_code, error_msg = mt5.last_error()
+            logger.error(
+                "Cannot resolve '%s': terminal exposed 0 symbols — it is "
+                "most likely not logged in to an account.  [%s] %s",
+                symbol, error_code, error_msg,
+            )
+            return None
+
+        base = symbol.upper()
+        sep_suffix: list[str] = []   # base + sep + …   (EURUSD.a)
+        sep_prefix: list[str] = []   # … + sep + base   (m.EURUSD)
+        known_suffix: list[str] = []  # base + known suffix, no sep (EURUSDm)
+
+        for s in all_syms:
+            up = s.name.upper()
+            if up == base:
+                return s.name  # case-only difference
+            if (up.startswith(base) and len(up) > len(base)
+                    and up[len(base)] in self._SEPARATORS):
+                sep_suffix.append(s.name)
+            elif (up.endswith(base) and len(up) > len(base)
+                    and up[-len(base) - 1] in self._SEPARATORS):
+                sep_prefix.append(s.name)
+            elif up.startswith(base) and up[len(base):] in self._KNOWN_SUFFIXES:
+                known_suffix.append(s.name)
+
+        candidates = sep_suffix or sep_prefix or known_suffix
+        if not candidates:
+            # Surface a few near matches so the operator can spot the real
+            # name (e.g. the broker calls it "EUR/USD" or "EURUSD.pro").
+            near = sorted(
+                s.name for s in all_syms if base[:3] in s.name.upper()
+            )[:8]
+            logger.error(
+                "Symbol '%s' not found among %d server symbols. "
+                "Near matches: %s",
+                symbol, len(all_syms), ", ".join(near) or "(none)",
+            )
+            return None
+
+        best = min(candidates, key=len)
+        if len(candidates) > 1:
+            logger.warning(
+                "Multiple broker names match '%s': %s — using '%s'.",
+                symbol, ", ".join(sorted(candidates)), best,
+            )
+        else:
+            logger.info("Resolved symbol '%s' → broker name '%s'.", symbol, best)
+        return best
+
+    def ensure_symbol(self, symbol: str) -> Optional[str]:
+        """Make sure *symbol* is available and visible in Market Watch.
+
+        Tolerates broker prefixes/suffixes via :meth:`resolve_symbol`.
 
         Args:
-            symbol: The instrument name (e.g. ``"EURUSD"``).
+            symbol: The canonical instrument name (e.g. ``"EURUSD"``).
 
         Returns:
-            ``True`` if the symbol is now selected, ``False`` on error.
+            The broker's actual symbol name on success (which may differ
+            from *symbol* — callers should use it for ticks/orders), or
+            ``None`` if it cannot be found or selected.
         """
-        # Check if the symbol exists on this server at all.
-        info = mt5.symbol_info(symbol)
-        if info is None:
-            logger.error("Symbol '%s' not found on the server.", symbol)
-            return False
+        resolved = self.resolve_symbol(symbol)
+        if resolved is None:
+            return None
 
-        # If it's not currently visible, select it.
+        info = mt5.symbol_info(resolved)
+        if info is None:  # defensive: should not happen post-resolution
+            logger.error("Symbol '%s' vanished after resolution.", resolved)
+            return None
+
+        # If it's not currently visible, select it into Market Watch.
         if not info.visible:
-            if not mt5.symbol_select(symbol, True):
+            if not mt5.symbol_select(resolved, True):
                 error_code, error_msg = mt5.last_error()
                 logger.error(
                     "Failed to select symbol '%s'  [%s] %s",
-                    symbol,
+                    resolved,
                     error_code,
                     error_msg,
                 )
-                return False
-            logger.info("Symbol '%s' enabled in Market Watch.", symbol)
+                return None
+            logger.info("Symbol '%s' enabled in Market Watch.", resolved)
         else:
-            logger.debug("Symbol '%s' is already visible.", symbol)
+            logger.debug("Symbol '%s' is already visible.", resolved)
 
-        return True
+        return resolved
 
     # ── Account information ──────────────────────────────────────────────
 
