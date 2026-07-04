@@ -211,7 +211,11 @@ a { color: var(--gold); text-decoration: none; }
    ═══════════════════════════════════════════════════════════════════════ */
 .main-grid {
   display: grid;
-  grid-template-columns: 1fr 380px;
+  /* minmax(0,1fr): let the left column SHRINK below its content's natural
+     width (wide bot tables scroll inside .table-wrap instead of shoving the
+     right-side panels off the screen — grid "1fr" alone can't shrink past
+     a table's min-content width). */
+  grid-template-columns: minmax(0, 1fr) 380px;
   gap: 1.25rem;
   padding: 1.25rem;
   max-width: 1600px;
@@ -233,6 +237,7 @@ a { color: var(--gold); text-decoration: none; }
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
+  min-width: 0; /* allow shrinking; inner tables scroll via .table-wrap */
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -546,6 +551,7 @@ table.journal-table td {
   font-size: .68rem; font-weight: 700;
   text-transform: uppercase; letter-spacing: .04em;
   opacity: .75;
+  overflow: hidden; white-space: nowrap; /* label never spills past the bar */
 }
 .session-bar.sydney   { background: rgba(0,188,212,.2); color: #00BCD4; top: 6px; }
 .session-bar.tokyo    { background: rgba(255,184,0,.2); color: var(--gold); top: 30px; }
@@ -566,6 +572,11 @@ table.journal-table td {
   font-size: .7rem; font-weight: 600;
   color: var(--yellow);
   white-space: nowrap;
+}
+/* Late in the day the marker sits near the right edge — draw the clock
+   label on its LEFT so it isn't clipped by the timeline's overflow:hidden. */
+.time-marker.label-left::after {
+  left: auto; right: 4px;
 }
 
 .hour-labels {
@@ -2667,7 +2678,9 @@ table.journal-table td {
     const ampm = h >= 12 ? 'PM' : 'AM';
     const h12 = h % 12 || 12;
     const timeStr = h12 + ':' + String(m).padStart(2,'0') + ' ' + ampm;
-    html += `<div class="time-marker" style="left:${pct}%;" data-time="${timeStr} IST"></div>`;
+    // Past ~78% of the day the label would clip on the right — flip it left.
+    const flip = pct > 78 ? ' label-left' : '';
+    html += `<div class="time-marker${flip}" style="left:${pct}%;" data-time="${timeStr} IST"></div>`;
 
     dom.sessionTimeline.innerHTML = html;
     dom.utcClock.textContent = timeStr + ' IST';
