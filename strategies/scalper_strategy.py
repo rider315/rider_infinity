@@ -18,6 +18,10 @@ spread).  An entry needs ALL of:
 4. **Momentum push** — short-period rate-of-change agrees with the direction.
 5. **Micro-breakout trigger** — the latest close breaks the high/low of the
    previous ``breakout_lookback`` candles, i.e. a fresh thrust is underway.
+6. **Not chasing** — the close is no more than ``max_extension_atr`` ATRs
+   beyond the breakout level. A breakout that has already run half an ATR+
+   is an exhausted spike, not a fresh thrust; entering there gets stopped
+   out by the snap-back within seconds.
 
 Confidence scales with how strong the trend (ADX) and the breakout thrust are.
 
@@ -70,6 +74,15 @@ class ScalperStrategy(BaseStrategy):
         just happened.
     roc_period : int
         Rate-of-change lookback for the momentum push. Default 3.
+    max_extension_atr : float
+        Chase guard: maximum distance (in ATRs) the close may already be
+        *beyond* the breakout level for an entry to be allowed. Default 0.3
+        (an A/B replay on 7 days of XAUUSD M1 showed 0.3 beats 0.5 and no
+        guard: fewer trades, higher win-rate, smaller net loss).
+        The trade export showed the deadly pattern of buying/selling into an
+        already-vertical spike — price snaps back within seconds and the
+        tight stop is hit (hundreds of SL exits with 2–25 s duration).
+        Set <= 0 to disable.
     sl_pips : float
         Stop-loss distance in pips (tight). Default 8.
     tp_pips : float
@@ -86,6 +99,7 @@ class ScalperStrategy(BaseStrategy):
         breakout_lookback: int = 8,
         roc_period: int = 3,
         breakout_grace: int = 3,
+        max_extension_atr: float = 0.3,
         sl_pips: float = 8,
         tp_pips: float = 12,
     ) -> None:
@@ -107,6 +121,7 @@ class ScalperStrategy(BaseStrategy):
         self.breakout_lookback = breakout_lookback
         self.roc_period = roc_period
         self.breakout_grace = breakout_grace
+        self.max_extension_atr = max_extension_atr
 
     # ------------------------------------------------------------------
     @property
@@ -179,6 +194,17 @@ class ScalperStrategy(BaseStrategy):
         ema_rising = s["ema_fast"] > s["ema_fast_prev"]
         ema_falling = s["ema_fast"] < s["ema_fast_prev"]
 
+        # Chase guard: how far the close already sits beyond the breakout
+        # level, in ATRs. Entering more than ``max_extension_atr`` past the
+        # level means buying an exhausted spike — the snap-back stops it out
+        # within seconds (the dominant losing pattern in the trade export).
+        atr_v = s["atr"] if s["atr"] > 0 else 1e-9
+        ext_up = (s["close"] - s["breakout_high"]) / atr_v
+        ext_dn = (s["breakout_low"] - s["close"]) / atr_v
+        guard = self.max_extension_atr
+        not_chasing_up = guard <= 0 or ext_up <= guard
+        not_chasing_dn = guard <= 0 or ext_dn <= guard
+
         # ---- BUY: uptrend + accelerating + momentum + micro-breakout up ----
         if (
             adx_ok
@@ -186,6 +212,7 @@ class ScalperStrategy(BaseStrategy):
             and ema_rising
             and s["roc"] > 0
             and s["recent_break_up"]
+            and not_chasing_up
         ):
             conf = self._confidence(s)
             reason = (
@@ -207,6 +234,7 @@ class ScalperStrategy(BaseStrategy):
             and ema_falling
             and s["roc"] < 0
             and s["recent_break_dn"]
+            and not_chasing_dn
         ):
             conf = self._confidence(s)
             reason = (

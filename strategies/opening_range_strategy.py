@@ -85,6 +85,11 @@ class OpeningRangeBreakoutStrategy(BaseStrategy):
         self.use_squeeze = use_squeeze
         self.squeeze_factor = squeeze_factor
         self.atr_period = atr_period
+        # One-shot latch: (symbol, session-open timestamp) of breakouts already
+        # signalled. Without it the strategy re-fires on EVERY bar for as long
+        # as price stays beyond the range, and a Quick-Exit bot re-enters all
+        # session long. Classic ORB takes the FIRST breakout of a session only.
+        self._fired: dict[tuple[str, pd.Timestamp], str] = {}
 
     @property
     def name(self) -> str:
@@ -143,11 +148,20 @@ class OpeningRangeBreakoutStrategy(BaseStrategy):
         buf = self.buffer_atr * atr_v
         close = float(df["close"].iloc[-1])
 
+        # First breakout of this session only — re-firing every bar while
+        # price stays beyond the range just churns re-entries.
+        fired_key = (symbol, open_ts)
+        if fired_key in self._fired:
+            return self._hold(symbol)
+        if len(self._fired) > 64:  # keep the latch dict from growing forever
+            self._fired.clear()
+
         if close > orh + buf:
             confidence = min((close - orh) / atr_v, 1.0)
             reason = (f"{sess} OR breakout: close={close:.5f} > ORH={orh:.5f}+buf, "
                       f"conf={confidence:.2f}")
             logger.info("[%s] %s — %s", self.name, symbol, reason)
+            self._fired[fired_key] = "BUY"
             return Signal(SignalAction.BUY, symbol, self.sl_pips, self.tp_pips,
                           confidence, reason)
 
@@ -156,6 +170,7 @@ class OpeningRangeBreakoutStrategy(BaseStrategy):
             reason = (f"{sess} OR breakdown: close={close:.5f} < ORL={orl:.5f}-buf, "
                       f"conf={confidence:.2f}")
             logger.info("[%s] %s — %s", self.name, symbol, reason)
+            self._fired[fired_key] = "SELL"
             return Signal(SignalAction.SELL, symbol, self.sl_pips, self.tp_pips,
                           confidence, reason)
 

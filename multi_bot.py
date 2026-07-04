@@ -96,6 +96,8 @@ class BotInstance:
     last_ticket: int = field(default=0)
     active_tickets: list = field(default_factory=list)
     active_positions: list = field(default_factory=list)
+    # Epoch until which new entries are blocked (set after a losing SL exit).
+    cooldown_until: float = field(default=0.0)
     trigger_proximity: dict = field(default_factory=lambda: {
         "proximity_pct": 0.0, "direction": "NEUTRAL",
         "label": "—", "detail": "", "indicator_values": {},
@@ -486,10 +488,26 @@ class MultiBotManager:
 
                 # -- Execute BUY / SELL --
                 if signal.action in (SignalAction.BUY, SignalAction.SELL):
+                    # Guard: post-loss cooldown. A breakout signal stays valid
+                    # for several candles, so without this the bot re-enters
+                    # the same move seconds after being stopped out (the
+                    # loss-churn that dominated the losses in the export).
+                    now_ts = time.time()
+                    per_bot_cap = getattr(self.config, "max_positions_per_bot", 1)
+                    if now_ts < bot.cooldown_until:
+                        remaining = int(bot.cooldown_until - now_ts)
+                        bot.blocked_reason = (
+                            f"Post-loss cooldown ({remaining // 60}m"
+                            f"{remaining % 60:02d}s left)"
+                        )
+                        logger.debug(
+                            "Bot#%d signal=%s suppressed by post-loss cooldown "
+                            "(%ds left).",
+                            bot.bot_id, signal.action.value, remaining,
+                        )
                     # Guard: per-bot position limit (keeps each bot independent;
                     # the fleet-wide ceiling lives in risk_mgr.can_trade).
-                    per_bot_cap = getattr(self.config, "max_positions_per_bot", 1)
-                    if len(bot.active_tickets) >= per_bot_cap:
+                    elif len(bot.active_tickets) >= per_bot_cap:
                         bot.blocked_reason = (
                             f"Per-bot limit reached "
                             f"({len(bot.active_tickets)}/{per_bot_cap} open)"
@@ -619,6 +637,25 @@ class MultiBotManager:
 
         # ---- Resolve SL/TP: volatility-aware, capped, with an RR floor -----
         sl_pips, tp_pips = self._resolve_sl_tp(signal, df, symbol, point)
+
+        # Quick-Exit bots bank a few pips per trade — their stop must be in
+        # the same order of magnitude as the target. Without this cap a bot
+        # can pair a 5-pip target with a strategy's 50-pip default stop
+        # (risk 10× reward → needs >90% win-rate; the RSI bots' exact leak).
+        if bot.quick_exit_enabled and bot.quick_exit_pips > 0:
+            cap_mult = float(getattr(self.config, "quick_exit_sl_cap_mult", 0))
+            if cap_mult > 0:
+                cap = max(
+                    bot.quick_exit_pips * cap_mult,
+                    float(getattr(self.config, "min_sl_pips", 8)),
+                )
+                if sl_pips > cap:
+                    logger.info(
+                        "Bot#%d SL capped %.1f → %.1f pips (%.0f× quick-exit "
+                        "target %.1f).",
+                        bot.bot_id, sl_pips, cap, cap_mult, bot.quick_exit_pips,
+                    )
+                    sl_pips = round(cap, 1)
 
         # Lot size (risk-based when auto, otherwise the bot's fixed lot)
         if bot.lot_mode == "auto":
@@ -949,6 +986,8 @@ class MultiBotManager:
         if sym_info is None or sym_info.get("point", 0) <= 0:
             return
         point = sym_info["point"]
+        digits = sym_info.get("digits", 5)
+        trail = float(getattr(self.config, "quick_exit_trail_pips", 0.0))
 
         for pos in list(bot.active_positions):
             entry = pos.get("entry", 0.0)
@@ -964,19 +1003,53 @@ class MultiBotManager:
                 profit_price = entry - current
             profit_pips = price_to_pips(profit_price, bot.symbol, point)
 
-            if profit_pips >= target:
-                ticket = pos.get("ticket")
-                logger.info(
-                    "Bot#%d Quick Exit — closing #%s at +%.1f pips "
-                    "(target %.1f).",
-                    bot.bot_id, ticket, profit_pips, target,
-                )
-                ok = self.order_mgr.close_position(ticket)
-                if not ok:
-                    logger.warning(
-                        "Bot#%d Quick Exit close failed for #%s — will retry.",
-                        bot.bot_id, ticket,
+            if profit_pips < target:
+                continue
+            ticket = pos.get("ticket")
+
+            # Trailing-lock mode: instead of banking exactly +target and
+            # eating the full stop on losers (inverted R:R), ratchet the SL
+            # to lock in (profit − trail) pips and let the winner run. The
+            # 3s poll keeps raising the lock as profit grows; a reversal
+            # exits via the (now winning) stop.
+            if trail > 0:
+                lock_pips = profit_pips - trail
+                lock_dist = pips_to_price(lock_pips, bot.symbol, point)
+                cur_sl = pos.get("sl", 0.0) or 0.0
+                if pos.get("type") == "BUY":
+                    new_sl = round(entry + lock_dist, digits)
+                    improves = new_sl > cur_sl
+                else:
+                    new_sl = round(entry - lock_dist, digits)
+                    improves = cur_sl == 0.0 or new_sl < cur_sl
+                if not improves:
+                    continue
+                if self.order_mgr.modify_position(ticket, sl=new_sl):
+                    logger.info(
+                        "Bot#%d Quick Exit trail — #%s at +%.1f pips, "
+                        "SL locked at +%.1f pips (%.5f).",
+                        bot.bot_id, ticket, profit_pips, lock_pips, new_sl,
                     )
+                    continue
+                # Broker refused the tight stop (min stop distance etc.) —
+                # fall back to the classic hard close so profit is banked.
+                logger.warning(
+                    "Bot#%d Quick Exit trail modify failed for #%s — "
+                    "falling back to hard close.",
+                    bot.bot_id, ticket,
+                )
+
+            logger.info(
+                "Bot#%d Quick Exit — closing #%s at +%.1f pips "
+                "(target %.1f).",
+                bot.bot_id, ticket, profit_pips, target,
+            )
+            ok = self.order_mgr.close_position(ticket)
+            if not ok:
+                logger.warning(
+                    "Bot#%d Quick Exit close failed for #%s — will retry.",
+                    bot.bot_id, ticket,
+                )
 
     # Map MT5 deal reason codes to human-readable exit reasons.
     _DEAL_REASON_MAP = {
@@ -1024,6 +1097,21 @@ class MultiBotManager:
                 datetime.utcfromtimestamp(close_epoch).isoformat()
                 if close_epoch else None
             )
+
+            # Post-loss cooldown: a stop-out at a loss blocks re-entry for a
+            # while. Winning SL exits (e.g. a trailed Quick-Exit stop) don't
+            # trigger it — those are banked winners, not failed entries.
+            cooldown_min = float(getattr(self.config, "sl_cooldown_min", 0))
+            if (
+                cooldown_min > 0
+                and exit_reason in ("SL", "STOP_OUT")
+                and profit < 0
+            ):
+                bot.cooldown_until = time.time() + cooldown_min * 60.0
+                logger.info(
+                    "Bot#%d stop-loss at %.2f — entry cooldown for %.0f min.",
+                    bot.bot_id, profit, cooldown_min,
+                )
 
             # Pips relative to the stored entry, if we can resolve point size.
             pips = None

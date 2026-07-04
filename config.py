@@ -169,6 +169,36 @@ class Config:
         self.breakeven_lock_pips: float = float(os.getenv("BREAKEVEN_LOCK_PIPS", "1.0"))
         self.max_trade_hours: float = float(os.getenv("MAX_TRADE_HOURS", "48"))
 
+        # --- Post-loss cooldown -------------------------------------------
+        # After a bot's position is closed BY STOP-LOSS at a loss, block that
+        # bot from opening a new trade for this many minutes. The trade-export
+        # analysis showed the single biggest leak was loss-churn: a breakout
+        # signal stays valid for several candles, so after a stop-out the bot
+        # re-entered the same move within 1-2 minutes and was stopped again
+        # (494 of 954 XAUUSD trades opened <2 min after an SL, net −$330).
+        # 0 disables the cooldown.
+        self.sl_cooldown_min: float = float(os.getenv("SL_COOLDOWN_MIN", "15"))
+
+        # --- Quick Exit trailing lock -------------------------------------
+        # When a Quick-Exit bot reaches its profit target, instead of hard-
+        # closing at +target pips, ratchet the stop-loss to (profit − trail)
+        # pips so the winner can keep running while never giving back more
+        # than ``quick_exit_trail_pips``. Fixes the inverted risk:reward of
+        # "bank +5 pips but risk the full −8 pip stop" (needs a 62% win-rate
+        # to break even; the fleet ran at ~49%). 0 restores the old
+        # hard-close-at-target behaviour.
+        self.quick_exit_trail_pips: float = float(
+            os.getenv("QUICK_EXIT_TRAIL_PIPS", "2.0")
+        )
+        # Cap the stop-loss of Quick-Exit bots to this multiple of their pip
+        # target. Without it a bot can pair a 5-pip target with a strategy's
+        # 50-pip default stop — risking 10× the reward needs a >90% win-rate
+        # to break even (this exact combination made the RSI bots net losers
+        # despite a 73% win-rate). 0 disables the cap.
+        self.quick_exit_sl_cap_mult: float = float(
+            os.getenv("QUICK_EXIT_SL_CAP_MULT", "3.0")
+        )
+
         # --- Bot settings ------------------------------------------------
         self.magic_number: int = int(os.getenv("MAGIC_NUMBER", "123456"))
         self.dry_run: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
