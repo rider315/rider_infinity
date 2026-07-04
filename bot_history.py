@@ -99,7 +99,8 @@ class BotHistoryDB:
                 exit_reason   TEXT,
                 reason        TEXT    DEFAULT '',
                 confidence    REAL,
-                status        TEXT    NOT NULL DEFAULT 'OPEN'
+                status        TEXT    NOT NULL DEFAULT 'OPEN',
+                logic_version TEXT    DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_trades_bot
@@ -107,6 +108,11 @@ class BotHistoryDB:
             CREATE INDEX IF NOT EXISTS idx_trades_ticket
                 ON trades(ticket);
         """)
+        # Migration: add logic_version to trades tables created before the
+        # logic-fingerprint feature (ALTER is a no-op error if it exists).
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)")]
+        if "logic_version" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN logic_version TEXT DEFAULT ''")
         conn.commit()
         self.logger.info("Bot history DB ready at %s", self._db_path)
 
@@ -258,11 +264,15 @@ class BotHistoryDB:
         reason: str = "",
         confidence: float | None = None,
         open_time: str | None = None,
+        logic_version: str = "",
     ) -> None:
         """Insert an OPEN trade row keyed by the MT5 position ``ticket``.
 
         Called when a live order is accepted by the broker.  The matching
         close is recorded later via :meth:`record_trade_close`.
+        ``logic_version`` stamps the trade with the code/settings fingerprint
+        active at entry (see ``logic_version.py``) so exports can be split
+        before/after a strategy change.
         """
         now = open_time or datetime.now(timezone.utc).isoformat()
         conn = self._conn()
@@ -270,11 +280,13 @@ class BotHistoryDB:
             conn.execute(
                 """INSERT OR IGNORE INTO trades
                    (bot_id, ticket, symbol, strategy, action, lot,
-                    entry_price, sl, tp, open_time, reason, confidence, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')""",
+                    entry_price, sl, tp, open_time, reason, confidence,
+                    status, logic_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)""",
                 (
                     bot_id, ticket, symbol, strategy, action, lot,
                     entry_price, sl, tp, now, reason, confidence,
+                    logic_version,
                 ),
             )
             conn.commit()

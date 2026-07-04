@@ -21,7 +21,8 @@ from typing import Any, Dict, List, Optional
 
 # Column order for the exported CSV (stable, analysis-friendly).
 CSV_COLUMNS = [
-    "id", "bot_id", "ticket", "symbol", "strategy", "action", "lot",
+    "id", "bot_id", "ticket", "symbol", "strategy", "logic_version",
+    "action", "lot",
     "entry_price", "sl", "tp", "exit_price", "pips", "profit", "swap",
     "commission", "open_time", "close_time", "duration_sec",
     "exit_reason", "reason", "confidence", "status",
@@ -263,4 +264,35 @@ def build_summary(
         "by_strategy": _group_metrics(closed, "strategy"),
         "by_symbol": _group_metrics(closed, "symbol"),
         "by_exit_reason": _group_metrics(closed, "exit_reason"),
+        # Split by the code/settings fingerprint stamped at entry, so the
+        # effect of a strategy change is directly comparable: trades under
+        # the old logic vs trades under the new logic. "—" = trades from
+        # before fingerprinting existed (or MT5 backfills).
+        "by_logic_version": _group_metrics(closed, "logic_version"),
+        "logic_version_info": _logic_version_info(closed),
+    }
+
+
+def _logic_version_info(closed: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """First-seen timestamps / strategy for each version present in the data.
+
+    Makes the JSON export self-describing: a version hash can be ordered in
+    time and traced to its settings snapshot in ``data/logic_versions.json``.
+    """
+    present = {str(t.get("logic_version") or "") for t in closed} - {""}
+    if not present:
+        return {}
+    try:
+        from logic_version import load_registry
+
+        registry = load_registry()
+    except Exception:
+        return {}
+    return {
+        v: {
+            "strategy": registry[v].get("strategy", ""),
+            "first_seen": registry[v].get("first_seen", ""),
+        }
+        for v in sorted(present)
+        if v in registry
     }

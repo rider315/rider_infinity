@@ -40,6 +40,7 @@ from strategies import get_strategy, list_strategies
 from strategies.base import SignalAction
 from utils import compute_atr, pips_to_price, price_to_pips, save_trade_to_journal, setup_logger
 from bot_history import BotHistoryDB
+from logic_version import compute_logic_version
 
 # How often (seconds) a Quick-Exit-armed bot re-checks its open position's
 # floating profit while in a trade. Small enough to bank a few-pip move,
@@ -617,6 +618,41 @@ class MultiBotManager:
             tp_pips = max(tp_pips, sl_pips * rr)
         return round(sl_pips, 1), round(tp_pips, 1)
 
+    def _logic_version(self, bot: BotInstance) -> str:
+        """Fingerprint of the code + settings shaping this bot's trades.
+
+        Stamped on every trade row so exported history can be split into
+        before/after any strategy or trade-management change. Covers the
+        strategy source file, the engine files, the bot's strategy params,
+        and every setting that alters trade behaviour without a code edit.
+        """
+        try:
+            cfg = self.config
+            settings = {
+                "quick_exit_enabled": bot.quick_exit_enabled,
+                "quick_exit_pips": bot.quick_exit_pips,
+                "timeframe": bot.timeframe_key,
+                "use_atr_stops": getattr(cfg, "use_atr_stops", False),
+                "atr_sl_mult": getattr(cfg, "atr_sl_mult", None),
+                "min_rr_ratio": getattr(cfg, "min_rr_ratio", None),
+                "min_sl_pips": getattr(cfg, "min_sl_pips", None),
+                "max_sl_pips": getattr(cfg, "max_sl_pips", None),
+                "breakeven_enabled": getattr(cfg, "breakeven_enabled", None),
+                "breakeven_trigger_r": getattr(cfg, "breakeven_trigger_r", None),
+                "max_trade_hours": getattr(cfg, "max_trade_hours", None),
+                "trade_hour_start": getattr(cfg, "trade_hour_start", None),
+                "trade_hour_end": getattr(cfg, "trade_hour_end", None),
+                "sl_cooldown_min": getattr(cfg, "sl_cooldown_min", None),
+                "quick_exit_trail_pips": getattr(cfg, "quick_exit_trail_pips", None),
+                "quick_exit_sl_cap_mult": getattr(cfg, "quick_exit_sl_cap_mult", None),
+            }
+            return compute_logic_version(
+                bot.strategy_name, bot.strategy_params, settings
+            )
+        except Exception as exc:
+            self.logger.debug("logic version compute failed: %s", exc)
+            return ""
+
     def _execute_signal(self, bot: BotInstance, signal, df, logger: logging.Logger) -> None:
         """Place an order for a bot's signal."""
         symbol = signal.symbol or bot.symbol
@@ -773,6 +809,7 @@ class MultiBotManager:
                     entry_price=entry,
                     sl=sl_price,
                     tp=tp_price,
+                    logic_version=self._logic_version(bot),
                     reason=signal.reason or "",
                     confidence=signal.confidence,
                 )

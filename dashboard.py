@@ -545,6 +545,17 @@ def create_app() -> Flask:
             logger.error("GET /api/performance/summary error: %s", exc)
             return jsonify({"error": str(exc)}), 500
 
+    @app.route("/api/performance/logic-versions", methods=["GET"])
+    def api_performance_logic_versions():
+        """Return the logic-version registry: every code/settings fingerprint
+        ever stamped on a trade, with first-seen time and settings snapshot."""
+        try:
+            from logic_version import load_registry
+            return jsonify(load_registry())
+        except Exception as exc:
+            logger.error("GET /api/performance/logic-versions error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
     @app.route("/api/performance/backfill", methods=["POST"])
     def api_performance_backfill():
         """Import past CLOSED live trades from MT5 deal history into the DB."""
