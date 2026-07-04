@@ -10,7 +10,10 @@
       "Bash(git add *)",
       "Bash(git reset *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "PowerShell(graphify update .)",
+      "PowerShell(python -m py_compile dashboard.py)",
+      "PowerShell(if \\($?\\) { \"compile OK\" })"
     ]
   }
 }

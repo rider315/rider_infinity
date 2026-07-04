@@ -2010,16 +2010,28 @@ def _init_news_engine(config: Config) -> dict | None:
 def main() -> None:
     """Entry point — print banner, initialise, and run the Flask server."""
     import os
+    import sys
     import threading
     import webbrowser
 
+    # Windows consoles often run cp1252, which can't encode unicode output
+    # (box-drawing banners, ellipses in log lines) and crashes the process.
+    # Prefer UTF-8 with replacement; if a wrapper (e.g. colorama) already
+    # owns the stream and can't be reconfigured, the ASCII banner below is
+    # safe regardless.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
     banner = r"""
-    ╔══════════════════════════════════════════════════╗
-    ║                                                  ║
-    ║      ∞  RIDER INFINITY — Trading Dashboard       ║
-    ║    Ride on the Infinity edge of Markets.          ║
-    ║                                                  ║
-    ╚══════════════════════════════════════════════════╝
+    +==================================================+
+    |                                                  |
+    |     oo  RIDER INFINITY - Trading Dashboard       |
+    |     Ride on the Infinity edge of Markets.        |
+    |                                                  |
+    +==================================================+
     """
     print(banner)
 

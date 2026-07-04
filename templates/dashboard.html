@@ -13,38 +13,42 @@
    CSS CUSTOM PROPERTIES
    ═══════════════════════════════════════════════════════════════════════ */
 :root {
-  --bg-deep:       #0D0A14;
-  --bg-primary:    #120E1C;
-  --bg-card:       rgba(18, 14, 28, 0.75);
-  --bg-card-hover: rgba(28, 22, 42, 0.85);
-  --bg-input:      rgba(13, 10, 20, 0.8);
-  --border:        rgba(255,255,255,0.06);
-  --border-glow:   rgba(255,184,0,0.2);
+  /* Neutral slate surfaces — solid (no glass) for crisp text & fast paint */
+  --bg-deep:       #0B0E14;
+  --bg-primary:    #10141C;
+  --bg-card:       #131823;
+  --bg-card-hover: #1A202C;
+  --bg-elev:       #1B2130;   /* popups, modals, toasts, tooltips */
+  --bg-input:      #0C1018;
+  --border:        rgba(255,255,255,0.08);
+  --border-glow:   rgba(240,180,41,0.35);
 
-  --gold:    #FFB800;
-  --green:   #00E676;
-  --red:     #FF4757;
-  --yellow:  #FFC107;
-  --orange:  #FF9F43;
-  --purple:  #B14EFF;
+  /* One brand accent (gold); green/red reserved for P&L & trade state */
+  --gold:    #F0B429;
+  --green:   #2FD483;
+  --red:     #F6465D;
+  --yellow:  #F0B429;   /* consolidated with gold — one warm accent */
+  --orange:  #F2994A;
+  --purple:  #A78BFA;
 
-  --text:        #F0E6D6;
-  --text-dim:    #A89B8C;
-  --text-muted:  #6B5E50;
+  /* Neutral text ramp with real contrast (was warm-brown, sub-AA) */
+  --text:        #E8ECF3;
+  --text-dim:    #A6B0C0;
+  --text-muted:  #7C8698;
 
   --glass-blur:  16px;
-  --radius:      14px;
+  --radius:      10px;
   --radius-sm:   8px;
   --radius-xs:   5px;
-  --shadow:      0 8px 32px rgba(0,0,0,0.45);
-  --transition:  .22s cubic-bezier(.4,0,.2,1);
+  --shadow:      0 4px 20px rgba(0,0,0,0.35);
+  --transition:  .18s cubic-bezier(.4,0,.2,1);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
    RESET & BASE
    ═══════════════════════════════════════════════════════════════════════ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { font-size: 14px; scroll-behavior: smooth; }
+html { font-size: 15px; scroll-behavior: smooth; }
 body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   background: var(--bg-deep);
@@ -54,29 +58,27 @@ body {
   line-height: 1.5;
 }
 
-/* Animated background mesh */
+/* Single, very subtle vignette — the old 3-gradient "mesh" muddied text
+   contrast and repainted constantly. */
 body::before {
   content: '';
   position: fixed; inset: 0;
-  background:
-    radial-gradient(ellipse 80% 60% at 10% 20%, rgba(255,184,0,.06), transparent),
-    radial-gradient(ellipse 60% 50% at 90% 80%, rgba(0,230,118,.04), transparent),
-    radial-gradient(ellipse 70% 40% at 50% 50%, rgba(177,78,255,.04), transparent);
+  background: radial-gradient(ellipse 90% 70% at 50% -10%, rgba(240,180,41,.04), transparent);
   pointer-events: none;
   z-index: 0;
 }
 
 a { color: var(--gold); text-decoration: none; }
-::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.2); }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,.15); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.25); }
 
 /* ═══════════════════════════════════════════════════════════════════════
    ANIMATIONS
    ═══════════════════════════════════════════════════════════════════════ */
 @keyframes fadeInUp {
-  from { opacity: 0; transform: translateY(24px); }
+  from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 @keyframes fadeIn {
@@ -115,13 +117,13 @@ a { color: var(--gold); text-decoration: none; }
   to   { transform: translateX(120%); opacity: 0; }
 }
 
-.anim-fade-in { animation: fadeInUp .5s ease-out both; }
-.anim-delay-1 { animation-delay: .06s; }
-.anim-delay-2 { animation-delay: .12s; }
-.anim-delay-3 { animation-delay: .18s; }
-.anim-delay-4 { animation-delay: .24s; }
-.anim-delay-5 { animation-delay: .30s; }
-.anim-delay-6 { animation-delay: .36s; }
+.anim-fade-in { animation: fadeInUp .3s ease-out both; }
+.anim-delay-1 { animation-delay: .03s; }
+.anim-delay-2 { animation-delay: .06s; }
+.anim-delay-3 { animation-delay: .09s; }
+.anim-delay-4 { animation-delay: .12s; }
+.anim-delay-5 { animation-delay: .15s; }
+.anim-delay-6 { animation-delay: .18s; }
 
 /* ═══════════════════════════════════════════════════════════════════════
    TOP BAR
@@ -130,11 +132,11 @@ a { color: var(--gold); text-decoration: none; }
   position: sticky; top: 0; z-index: 100;
   display: flex; align-items: center; justify-content: space-between;
   gap: 1rem;
-  padding: .75rem 1.5rem;
-  background: rgba(6,9,24,.85);
-  backdrop-filter: blur(20px);
+  padding: .7rem 1.5rem;
+  background: rgba(11,14,20,.92);
+  backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
-  animation: fadeIn .4s ease-out;
+  animation: fadeIn .3s ease-out;
 }
 .topbar-logo {
   display: flex; align-items: center; gap: .6rem;
@@ -145,28 +147,16 @@ a { color: var(--gold); text-decoration: none; }
 }
 .topbar-logo .ri-monogram {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 36px; height: 36px;
+  width: 34px; height: 34px;
   border-radius: 8px;
   font-size: 1rem; font-weight: 900;
   letter-spacing: .02em;
-  background: linear-gradient(135deg, var(--gold), var(--orange));
-  color: #0D0A14;
-  animation: riGlow 3s ease-in-out infinite;
-  box-shadow: 0 0 12px rgba(255,184,0,.3);
+  background: var(--gold);
+  color: #0B0E14;
 }
 .topbar-logo .brand-text {
-  background: linear-gradient(135deg, var(--gold), var(--orange), var(--gold));
-  background-size: 200% 100%;
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  animation: riShimmer 4s linear infinite;
-}
-@keyframes riGlow {
-  0%, 100% { box-shadow: 0 0 12px rgba(255,184,0,.3); }
-  50% { box-shadow: 0 0 24px rgba(255,184,0,.5), 0 0 48px rgba(255,184,0,.15); }
-}
-@keyframes riShimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
+  color: var(--gold);
+  font-weight: 800;
 }
 
 .topbar-right {
@@ -178,7 +168,7 @@ a { color: var(--gold); text-decoration: none; }
   display: flex; flex-direction: column; align-items: flex-end;
   line-height: 1.2;
 }
-.acct-label { font-size: .65rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }
+.acct-label { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }
 .acct-value { font-size: .95rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 
 .market-status {
@@ -199,7 +189,7 @@ a { color: var(--gold); text-decoration: none; }
 .session-badges { display: flex; gap: .35rem; }
 .session-badge {
   padding: .2rem .6rem; border-radius: 12px;
-  font-size: .65rem; font-weight: 600;
+  font-size: .7rem; font-weight: 600;
   text-transform: uppercase; letter-spacing: .04em;
   background: rgba(255,184,0,.1); color: var(--gold);
   border: 1px solid rgba(255,184,0,.15);
@@ -250,28 +240,27 @@ a { color: var(--gold); text-decoration: none; }
    ═══════════════════════════════════════════════════════════════════════ */
 .card {
   background: var(--bg-card);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   overflow: hidden;
-  transition: border-color var(--transition), box-shadow var(--transition);
-}
-.card:hover {
-  border-color: var(--border-glow);
 }
 .card-header {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 1rem 1.25rem;
+  padding: .85rem 1.15rem;
   border-bottom: 1px solid var(--border);
 }
 .card-title {
-  display: flex; align-items: center; gap: .5rem;
-  font-size: 1rem; font-weight: 700;
+  display: flex; align-items: center; gap: .55rem;
+  font-size: .95rem; font-weight: 700;
   letter-spacing: -.01em;
 }
-.card-title .icon { font-size: 1.15rem; }
+/* Mute the emoji icons into uniform monochrome glyphs */
+.card-title .icon {
+  font-size: 1rem;
+  filter: grayscale(1) brightness(1.7);
+  opacity: .8;
+}
 .card-body { padding: 1rem 1.25rem; }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -349,23 +338,19 @@ table.bot-table tbody tr.signal-changed {
 .btn:active { transform: scale(.96); }
 
 .btn-primary {
-  background: linear-gradient(135deg, var(--gold), #CC9300);
-  color: #0D0A14;
-  box-shadow: 0 2px 12px rgba(255,184,0,.2);
+  background: var(--gold);
+  color: #0B0E14;
 }
 .btn-primary:hover {
-  box-shadow: 0 4px 24px rgba(255,184,0,.35);
-  transform: translateY(-1px);
+  background: #FFC94D;
 }
 
 .btn-danger {
-  background: linear-gradient(135deg, var(--red), #cc3344);
+  background: var(--red);
   color: #fff;
-  box-shadow: 0 2px 12px rgba(255,71,87,.2);
 }
 .btn-danger:hover {
-  box-shadow: 0 4px 24px rgba(255,71,87,.35);
-  transform: translateY(-1px);
+  background: #FF6478;
 }
 
 .btn-ghost {
@@ -492,7 +477,6 @@ input[type="date"].form-control::-webkit-calendar-picker-indicator {
 .btn-preset:hover {
   background: rgba(168,85,247,.2);
   border-color: rgba(168,85,247,.4);
-  transform: translateY(-1px);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -531,7 +515,7 @@ table.journal-table {
 table.journal-table th {
   padding: .45rem .35rem;
   text-align: left;
-  font-weight: 600; font-size: .65rem;
+  font-weight: 600; font-size: .7rem;
   text-transform: uppercase; letter-spacing: .05em;
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
@@ -559,7 +543,7 @@ table.journal-table td {
   position: absolute; height: 18px;
   border-radius: 4px;
   display: flex; align-items: center; justify-content: center;
-  font-size: .6rem; font-weight: 700;
+  font-size: .68rem; font-weight: 700;
   text-transform: uppercase; letter-spacing: .04em;
   opacity: .75;
 }
@@ -579,14 +563,14 @@ table.journal-table td {
 .time-marker::after {
   content: attr(data-time);
   position: absolute; top: -1px; left: 4px;
-  font-size: .55rem; font-weight: 600;
+  font-size: .7rem; font-weight: 600;
   color: var(--yellow);
   white-space: nowrap;
 }
 
 .hour-labels {
   display: flex; justify-content: space-between;
-  font-size: .55rem; color: var(--text-muted);
+  font-size: .7rem; color: var(--text-muted);
   padding: 0 2px; margin-top: .25rem;
 }
 
@@ -641,8 +625,7 @@ table.journal-table td {
 .toast {
   display: flex; align-items: center; gap: .6rem;
   padding: .7rem 1.1rem;
-  background: rgba(15,20,50,.92);
-  backdrop-filter: blur(12px);
+  background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   box-shadow: 0 8px 32px rgba(0,0,0,.4);
@@ -677,8 +660,7 @@ table.journal-table td {
 }
 .modal-overlay.visible { opacity: 1; pointer-events: auto; }
 .modal-box {
-  background: rgba(15,20,50,.95);
-  backdrop-filter: blur(20px);
+  background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: 0 24px 80px rgba(0,0,0,.5);
@@ -708,9 +690,8 @@ table.journal-table td {
 .edit-panel {
   position: fixed; top: 0; right: -460px; bottom: 0;
   width: 440px; max-width: 95vw;
-  background: rgba(15,18,35,.97);
-  backdrop-filter: blur(24px);
-  border-left: 1px solid rgba(255,184,0,.15);
+  background: var(--bg-elev);
+  border-left: 1px solid var(--border);
   box-shadow: -16px 0 60px rgba(0,0,0,.5);
   z-index: 9100;
   display: flex; flex-direction: column;
@@ -746,7 +727,7 @@ table.journal-table td {
   display: flex; flex-direction: column; gap: .1rem;
 }
 .edit-summary-label {
-  font-size: .65rem; color: var(--text-muted);
+  font-size: .7rem; color: var(--text-muted);
   text-transform: uppercase; letter-spacing: .05em; font-weight: 600;
 }
 .edit-summary-value {
@@ -904,7 +885,7 @@ table.journal-table td {
 .position-item:hover .pos-edit-icon { opacity: 1; }
 .pos-right { display: flex; align-items: center; gap: .5rem; }
 .pos-trailing-badge {
-  font-size: .58rem; font-weight: 700;
+  font-size: .66rem; font-weight: 700;
   padding: .15rem .4rem; border-radius: 3px;
   background: rgba(0,230,118,.12); color: var(--green);
   text-transform: uppercase; letter-spacing: .04em;
@@ -929,7 +910,7 @@ table.journal-table td {
 .pending-edit-btn, .pending-cancel-btn {
   padding: .25rem .5rem; border: 1px solid var(--border);
   border-radius: var(--radius-xs); background: rgba(255,255,255,.03);
-  color: var(--text-muted); font-size: .65rem; cursor: pointer;
+  color: var(--text-muted); font-size: .7rem; cursor: pointer;
   transition: all .2s;
 }
 .pending-edit-btn:hover { border-color: var(--gold); color: var(--gold); }
@@ -946,7 +927,7 @@ table.journal-table td {
   position: absolute; bottom: calc(100% + 6px); left: 50%;
   transform: translateX(-50%);
   padding: .35rem .65rem;
-  background: rgba(10,14,39,.95);
+  background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius-xs);
   font-size: .7rem; font-weight: 400; color: var(--text-dim);
@@ -996,11 +977,10 @@ table.journal-table td {
   min-width: 380px;
   max-width: 480px;
   padding: 0;
-  background: rgba(14, 11, 22, 0.97);
-  border: 1px solid rgba(255,184,0,.2);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  box-shadow: 0 12px 40px rgba(0,0,0,.6), 0 0 20px rgba(255,184,0,.06);
-  backdrop-filter: blur(20px);
+  box-shadow: 0 12px 40px rgba(0,0,0,.55);
   animation: popupSlideIn .2s ease-out;
   overflow: hidden;
 }
@@ -1024,7 +1004,7 @@ table.journal-table td {
   color: var(--gold);
 }
 .trades-popup-count {
-  font-size: .65rem; font-weight: 600;
+  font-size: .7rem; font-weight: 600;
   padding: .15rem .45rem;
   background: rgba(255,184,0,.12);
   border-radius: 10px;
@@ -1053,7 +1033,7 @@ table.journal-table td {
   margin-bottom: .15rem;
 }
 .trade-ticket {
-  font-size: .65rem; font-weight: 600;
+  font-size: .7rem; font-weight: 600;
   color: var(--text-muted);
   font-family: 'Inter', monospace;
 }
@@ -1119,7 +1099,7 @@ table.journal-table td {
 .news-item:hover { background: var(--bg-card-hover); }
 .sentiment-badge {
   padding: .15rem .5rem; border-radius: 10px;
-  font-size: .65rem; font-weight: 700; text-transform: uppercase;
+  font-size: .7rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: .04em; white-space: nowrap;
 }
 .sentiment-badge.bullish { background: rgba(0,255,136,.15); color: var(--green); }
@@ -1149,7 +1129,7 @@ table.journal-table td {
   background: rgba(255,255,255,.03); border-radius: var(--radius-sm);
 }
 .news-stat-value { font-size: 1.2rem; font-weight: 700; }
-.news-stat-label { font-size: .65rem; color: var(--text-muted); text-transform: uppercase; }
+.news-stat-label { font-size: .7rem; color: var(--text-muted); text-transform: uppercase; }
 .source-health {
   display: flex; gap: .5rem; flex-wrap: wrap;
 }
@@ -1205,7 +1185,7 @@ table.journal-table td {
 }
 .bt-metric-card:hover { border-color: var(--border-glow); }
 .bt-metric-label {
-  font-size: .65rem; text-transform: uppercase; letter-spacing: .06em;
+  font-size: .7rem; text-transform: uppercase; letter-spacing: .06em;
   color: var(--text-muted); margin-bottom: .25rem;
 }
 .bt-metric-value {
@@ -1254,7 +1234,7 @@ table.journal-table td {
   position: absolute;
   inset: 0;
   display: flex; align-items: center; justify-content: center;
-  font-size: .6rem; font-weight: 700;
+  font-size: .68rem; font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--text);
 }
@@ -1271,14 +1251,14 @@ table.journal-table td {
   max-width: 130px;
 }
 .proximity-detail {
-  font-size: .6rem;
+  font-size: .68rem;
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
   max-width: 130px;
 }
 .proximity-dir {
-  font-size: .6rem; font-weight: 700;
+  font-size: .68rem; font-weight: 700;
   letter-spacing: .04em;
   padding: .1rem .3rem;
   border-radius: 4px;
@@ -1310,7 +1290,7 @@ table.journal-table td {
   width: 100%; border-collapse: collapse; font-size: .78rem;
 }
 .history-table th {
-  text-align: left; padding: .55rem .6rem; font-size: .65rem;
+  text-align: left; padding: .55rem .6rem; font-size: .7rem;
   text-transform: uppercase; letter-spacing: .06em;
   color: var(--text-muted); border-bottom: 1px solid var(--border);
   white-space: nowrap;
@@ -1339,11 +1319,11 @@ table.journal-table td {
 /* Status badges for history */
 .badge-active {
   background: rgba(0,230,118,.12); color: var(--green);
-  padding: .15rem .45rem; border-radius: 4px; font-size: .65rem; font-weight: 600;
+  padding: .15rem .45rem; border-radius: 4px; font-size: .7rem; font-weight: 600;
 }
 .badge-removed {
   background: rgba(255,255,255,.06); color: var(--text-muted);
-  padding: .15rem .45rem; border-radius: 4px; font-size: .65rem; font-weight: 600;
+  padding: .15rem .45rem; border-radius: 4px; font-size: .7rem; font-weight: 600;
 }
 
 /* Expandable detail row */
@@ -1400,11 +1380,11 @@ table.journal-table td {
   display: flex; align-items: center; gap: .35rem;
 }
 .timeline-detail {
-  font-size: .65rem; color: var(--text-dim); margin-top: .1rem;
+  font-size: .7rem; color: var(--text-dim); margin-top: .1rem;
   word-break: break-word;
 }
 .timeline-time {
-  font-size: .6rem; color: var(--text-muted); margin-top: .05rem;
+  font-size: .68rem; color: var(--text-muted); margin-top: .05rem;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1413,7 +1393,7 @@ table.journal-table td {
   width: 100%; border-collapse: collapse; font-size: .72rem;
 }
 .history-trades-table th {
-  text-align: left; padding: .35rem .5rem; font-size: .6rem;
+  text-align: left; padding: .35rem .5rem; font-size: .68rem;
   text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted);
   border-bottom: 1px solid var(--border);
 }
@@ -1425,7 +1405,7 @@ table.journal-table td {
 .btn-restore {
   background: rgba(0,230,118,.1); color: var(--green);
   border: 1px solid rgba(0,230,118,.25); border-radius: 6px;
-  padding: .2rem .55rem; font-size: .65rem; font-weight: 600;
+  padding: .2rem .55rem; font-size: .7rem; font-weight: 600;
   cursor: pointer; transition: all var(--transition);
   white-space: nowrap;
 }
@@ -1601,7 +1581,7 @@ table.journal-table td {
               <div style="display:flex;align-items:center;justify-content:space-between;gap:.5rem;">
                 <div>
                   <div style="font-size:.72rem;font-weight:700;color:var(--gold);margin-bottom:.15rem;">🏆 Optimized Strategy Available</div>
-                  <div id="botOptInfo" style="font-size:.65rem;color:var(--text-muted);line-height:1.35;"></div>
+                  <div id="botOptInfo" style="font-size:.7rem;color:var(--text-muted);line-height:1.35;"></div>
                 </div>
                 <label style="display:flex;align-items:center;gap:.35rem;cursor:pointer;flex-shrink:0;background:rgba(255,184,0,.1);padding:.3rem .6rem;border-radius:6px;border:1px solid rgba(255,184,0,.25);">
                   <input type="checkbox" id="botUseOptimized" style="accent-color:var(--gold);">
@@ -1790,7 +1770,7 @@ table.journal-table td {
     <div class="card anim-fade-in anim-delay-4">
       <div class="card-header">
         <div class="card-title"><span class="icon">⏳</span> Pending Orders</div>
-        <span style="font-size:.65rem;color:var(--text-muted);" id="pendingCount">0</span>
+        <span style="font-size:.7rem;color:var(--text-muted);" id="pendingCount">0</span>
       </div>
       <div class="card-body" id="pendingBody">
         <div class="empty-state" style="padding:1rem;">
@@ -2061,15 +2041,15 @@ table.journal-table td {
                   <span id="btRadioDefault" style="width:14px;height:14px;border-radius:50%;border:2px solid var(--gold);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;"><span style="width:7px;height:7px;border-radius:50%;background:var(--gold);"></span></span>
                   <span style="font-size:.75rem;font-weight:700;color:var(--text);">Default Parameters</span>
                 </div>
-                <div style="font-size:.65rem;color:var(--text-muted);padding-left:1.2rem;">Uses the strategy's built-in default settings</div>
+                <div style="font-size:.7rem;color:var(--text-muted);padding-left:1.2rem;">Uses the strategy's built-in default settings</div>
               </label>
               <label id="btParamModeOptimized" onclick="setBtParamMode('optimized')" style="flex:1.5;padding:.6rem .75rem;background:rgba(255,184,0,.04);border:2px solid var(--border);border-radius:8px;cursor:pointer;transition:all .2s;">
                 <div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.2rem;">
                   <span id="btRadioOpt" style="width:14px;height:14px;border-radius:50%;border:2px solid var(--text-muted);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;"><span style="width:7px;height:7px;border-radius:50%;background:transparent;"></span></span>
                   <span style="font-size:.75rem;font-weight:700;color:var(--text);">🏆 Optimized Parameters</span>
-                  <span id="btOptStaleBadge" style="display:none;font-size:.6rem;background:rgba(255,71,87,.15);color:var(--red);padding:.1rem .3rem;border-radius:4px;font-weight:600;"></span>
+                  <span id="btOptStaleBadge" style="display:none;font-size:.68rem;background:rgba(255,71,87,.15);color:var(--red);padding:.1rem .3rem;border-radius:4px;font-weight:600;"></span>
                 </div>
-                <div id="btOptParamDetail" style="font-size:.65rem;color:var(--text-muted);padding-left:1.2rem;line-height:1.4;"></div>
+                <div id="btOptParamDetail" style="font-size:.7rem;color:var(--text-muted);padding-left:1.2rem;line-height:1.4;"></div>
               </label>
             </div>
           </div>
@@ -2714,7 +2694,7 @@ table.journal-table td {
     const s = (sig || '—').toUpperCase();
     if (s === 'BUY')  return '<span class="badge badge-buy">▲ Buy</span>';
     if (s === 'SELL') return '<span class="badge badge-sell">▼ Sell</span>';
-    if (s.includes('MARKET CLOSED')) return `<span class="badge badge-waiting" style="font-size:.6rem;">⏳ ${sig}</span>`;
+    if (s.includes('MARKET CLOSED')) return `<span class="badge badge-waiting" style="font-size:.68rem;">⏳ ${sig}</span>`;
     return '<span class="badge badge-hold">— Hold</span>';
   }
 
@@ -2861,15 +2841,15 @@ table.journal-table td {
           totalPnl += pnl;
           totalVolume += p.volume || 0;
           const typeBadge = p.type === 'BUY'
-            ? '<span class="badge badge-buy" style="font-size:.58rem;">▲ Buy</span>'
-            : '<span class="badge badge-sell" style="font-size:.58rem;">▼ Sell</span>';
+            ? '<span class="badge badge-buy" style="font-size:.66rem;">▲ Buy</span>'
+            : '<span class="badge badge-sell" style="font-size:.66rem;">▼ Sell</span>';
           const pnlCls = pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
           const pnlSign = pnl >= 0 ? '+' : '';
           posRows += `<div class="trade-row">
             <div class="trade-row-head">
               <span class="trade-ticket">#${p.ticket}</span>
               ${typeBadge}
-              <span style="font-size:.65rem;color:var(--text-dim);margin-left:auto;">${p.volume} lots</span>
+              <span style="font-size:.7rem;color:var(--text-dim);margin-left:auto;">${p.volume} lots</span>
             </div>
             <span class="trade-row-label">Entry</span>
             <span class="trade-row-value">${Number(p.entry).toFixed(5)}</span>
@@ -2908,8 +2888,8 @@ table.journal-table td {
         tradesBadgeHtml = `<div class="trades-cell">
           <div class="trades-badge">
             <span>📈 ${tradeCount}</span>
-            <span style="color:var(--red);font-size:.65rem;">SL ${quickSl}</span>
-            <span style="color:var(--green);font-size:.65rem;">TP ${quickTp}</span>
+            <span style="color:var(--red);font-size:.7rem;">SL ${quickSl}</span>
+            <span style="color:var(--green);font-size:.7rem;">TP ${quickTp}</span>
           </div>
           ${tradesPopupHtml}
         </div>`;
@@ -2917,8 +2897,8 @@ table.journal-table td {
         // Dry-run or legacy: show last known SL/TP without popup
         tradesBadgeHtml = `<div class="trades-cell">
           <div class="trades-badge">
-            <span style="color:var(--red);font-size:.65rem;">SL ${b.last_sl ? fmt(b.last_sl, 5) : '—'}</span>
-            <span style="color:var(--green);font-size:.65rem;">TP ${b.last_tp ? fmt(b.last_tp, 5) : '—'}</span>
+            <span style="color:var(--red);font-size:.7rem;">SL ${b.last_sl ? fmt(b.last_sl, 5) : '—'}</span>
+            <span style="color:var(--green);font-size:.7rem;">TP ${b.last_tp ? fmt(b.last_tp, 5) : '—'}</span>
           </div>
         </div>`;
       } else {
@@ -2932,7 +2912,7 @@ table.journal-table td {
         <td>${b.timeframe_key}</td>
         <td class="tabular">${b.lot_mode==='auto' ? 'Auto' : fmt(b.lot_size)}</td>
         <td>${statusBadge(b.status)}</td>
-        <td>${signalBadge(b.last_signal)}${b.blocked_reason ? '<div class="tip" data-tip="' + b.blocked_reason.replace(/"/g, '&quot;') + '" style="font-size:.55rem;color:var(--red);margin-top:2px;cursor:help;">⛔ blocked</div>' : ''}</td>
+        <td>${signalBadge(b.last_signal)}${b.blocked_reason ? '<div class="tip" data-tip="' + b.blocked_reason.replace(/"/g, '&quot;') + '" style="font-size:.66rem;color:var(--red);margin-top:2px;cursor:help;">⛔ blocked</div>' : ''}</td>
         <td>${renderProximityGauge(b)}</td>
         <td class="tabular">${b.last_price ? fmt(b.last_price, 5) : '—'}</td>
         <td>${tradesBadgeHtml}</td>
@@ -3029,10 +3009,10 @@ table.journal-table td {
     j.forEach(t => {
       const action = (t.action||'').toUpperCase();
       const actionBadge = action === 'BUY'
-        ? '<span class="badge badge-buy" style="font-size:.62rem;">Buy</span>'
+        ? '<span class="badge badge-buy" style="font-size:.68rem;">Buy</span>'
         : action === 'SELL'
-          ? '<span class="badge badge-sell" style="font-size:.62rem;">Sell</span>'
-          : `<span class="badge badge-hold" style="font-size:.62rem;">${action||'—'}</span>`;
+          ? '<span class="badge badge-sell" style="font-size:.68rem;">Sell</span>'
+          : `<span class="badge badge-hold" style="font-size:.68rem;">${action||'—'}</span>`;
 
       const openTime = t.open_time || t.time;
       const timeStr = openTime ? new Date(openTime).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
@@ -3040,8 +3020,8 @@ table.journal-table td {
 
       const status = (t.status || 'OPEN').toUpperCase();
       const statusBadge = status === 'CLOSED'
-        ? '<span class="badge" style="font-size:.58rem;background:rgba(0,255,136,.12);color:var(--green);">CLOSED</span>'
-        : '<span class="badge" style="font-size:.58rem;background:rgba(255,193,7,.15);color:#ffc107;">OPEN</span>';
+        ? '<span class="badge" style="font-size:.66rem;background:rgba(0,255,136,.12);color:var(--green);">CLOSED</span>'
+        : '<span class="badge" style="font-size:.66rem;background:rgba(255,193,7,.15);color:#ffc107;">OPEN</span>';
 
       let profitHtml = '—';
       if (t.profit != null && status === 'CLOSED') {
@@ -3205,14 +3185,14 @@ table.journal-table td {
         const savedDate = new Date(d.created_at);
         const dateStr = savedDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
         const ageDays = Math.floor((Date.now() - savedDate.getTime()) / 86400000);
-        const staleNote = ageDays > 30 ? ` <span style="color:var(--red);font-size:.6rem;">\u26a0 ${ageDays}d old</span>` : '';
+        const staleNote = ageDays > 30 ? ` <span style="color:var(--red);font-size:.68rem;">\u26a0 ${ageDays}d old</span>` : '';
         document.getElementById('botOptInfo').innerHTML =
           `WR: <strong style="color:${d.win_rate >= 50 ? 'var(--green)' : 'var(--red)'}">${d.win_rate}%</strong> \u00b7 ` +
           `PF: <strong>${d.profit_factor}</strong> \u00b7 ` +
           `P&L: <strong style="color:${d.total_pnl_money >= 0 ? 'var(--green)' : 'var(--red)'}">${d.total_pnl_money >= 0 ? '+' : ''}$${d.total_pnl_money}</strong>` +
           staleNote + `<br>` +
-          `<span style="color:var(--gold);font-size:.6rem;">${paramStr || 'default'}</span>` +
-          ` \u00b7 <span style="font-size:.6rem;color:var(--text-dim);">Saved: ${dateStr}</span>`;
+          `<span style="color:var(--gold);font-size:.68rem;">${paramStr || 'default'}</span>` +
+          ` \u00b7 <span style="font-size:.68rem;color:var(--text-dim);">Saved: ${dateStr}</span>`;
         emptyEl.style.display = 'none'; foundEl.style.display = 'block';
       } else {
         emptyEl.style.display = 'block'; foundEl.style.display = 'none';
@@ -3630,7 +3610,7 @@ table.journal-table td {
     orders.forEach(function(o) {
       var typeLabel = o.type || 'PENDING';
       var isBuy = String(typeLabel).indexOf('BUY') >= 0;
-      var badge = isBuy ? '<span class="badge badge-buy" style="font-size:.6rem;">' + typeLabel + '</span>' : '<span class="badge badge-sell" style="font-size:.6rem;">' + typeLabel + '</span>';
+      var badge = isBuy ? '<span class="badge badge-buy" style="font-size:.68rem;">' + typeLabel + '</span>' : '<span class="badge badge-sell" style="font-size:.68rem;">' + typeLabel + '</span>';
       var slD = o.sl ? fmt(o.sl, 5) : '\u2014', tpD = o.tp ? fmt(o.tp, 5) : '\u2014';
       var price = o.price_open || o.price || 0;
       html += '<div class="pending-item"><div class="pending-left"><div class="pending-symbol">' + o.symbol + ' ' + badge + '</div>';
@@ -3918,8 +3898,8 @@ table.journal-table td {
 
       const modeStr = bot.dry_run ? 'DRY' : 'LIVE';
       const modeBadge = bot.dry_run
-        ? '<span class="badge badge-dry" style="font-size:.6rem;">DRY</span>'
-        : '<span class="badge badge-live" style="font-size:.6rem;">⚠ LIVE</span>';
+        ? '<span class="badge badge-dry" style="font-size:.68rem;">DRY</span>'
+        : '<span class="badge badge-live" style="font-size:.68rem;">⚠ LIVE</span>';
 
       const created = bot.created_at
         ? new Date(bot.created_at).toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'2-digit' })
@@ -4017,18 +3997,18 @@ table.journal-table td {
       trades.forEach(t => {
         const action = (t.action || '').toUpperCase();
         const actionBadge = action === 'BUY'
-          ? '<span class="badge badge-buy" style="font-size:.58rem;">Buy</span>'
+          ? '<span class="badge badge-buy" style="font-size:.66rem;">Buy</span>'
           : action === 'SELL'
-            ? '<span class="badge badge-sell" style="font-size:.58rem;">Sell</span>'
-            : `<span class="badge badge-hold" style="font-size:.58rem;">${action || '—'}</span>`;
+            ? '<span class="badge badge-sell" style="font-size:.66rem;">Sell</span>'
+            : `<span class="badge badge-hold" style="font-size:.66rem;">${action || '—'}</span>`;
         const openTime = t.open_time || t.time;
         const timeStr = openTime ? new Date(openTime).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
         const dateStr = openTime ? new Date(openTime).toLocaleDateString('en-GB', {day:'2-digit',month:'short'}) : '';
 
         const status = (t.status || 'OPEN').toUpperCase();
         const statusBadge = status === 'CLOSED'
-          ? '<span class="badge" style="font-size:.55rem;background:rgba(0,255,136,.12);color:var(--green);">CLOSED</span>'
-          : '<span class="badge" style="font-size:.55rem;background:rgba(255,193,7,.15);color:#ffc107;">OPEN</span>';
+          ? '<span class="badge" style="font-size:.66rem;background:rgba(0,255,136,.12);color:var(--green);">CLOSED</span>'
+          : '<span class="badge" style="font-size:.66rem;background:rgba(255,193,7,.15);color:#ffc107;">OPEN</span>';
 
         let profitHtml = '—';
         if (t.profit != null && status === 'CLOSED') {
@@ -4057,7 +4037,7 @@ table.journal-table td {
           <td class="tabular">${exitPrice}</td>
           <td class="tabular">${profitHtml}</td>
           <td class="tabular">${pipsHtml}</td>
-          <td style="font-size:.65rem;">${exitReason}</td>
+          <td style="font-size:.7rem;">${exitReason}</td>
         </tr>`;
       });
       tradesHtml += '</tbody></table></div>';
@@ -4201,15 +4181,15 @@ table.journal-table td {
       rules.forEach(r => {
         const sc = r.enabled ? 'var(--green)' : 'var(--red, #ff4444)';
         const st = r.enabled ? 'ON' : 'OFF';
-        const os = r.one_shot ? '<span style="font-size:.6rem;padding:.1rem .3rem;border-radius:3px;background:rgba(255,170,0,.15);color:#ffaa00;margin-left:.35rem;">ONE-SHOT</span>' : '';
+        const os = r.one_shot ? '<span style="font-size:.68rem;padding:.1rem .3rem;border-radius:3px;background:rgba(255,170,0,.15);color:#ffaa00;margin-left:.35rem;">ONE-SHOT</span>' : '';
         html += `<div style="display:flex;align-items:center;justify-content:space-between;padding:.4rem .6rem;background:rgba(255,255,255,.03);border-radius:6px;border:1px solid rgba(255,255,255,.06);">
           <div style="display:flex;align-items:center;gap:.5rem;">
             <span style="width:6px;height:6px;border-radius:50%;background:${sc};"></span>
             <span style="font-size:.75rem;color:var(--text);font-weight:500;">${r.name}${os}</span>
           </div>
           <div style="display:flex;align-items:center;gap:.5rem;">
-            <span style="font-size:.65rem;color:var(--text-muted);">Fired: ${r.execution_count}</span>
-            <span style="font-size:.65rem;font-weight:700;color:${sc};">${st}</span>
+            <span style="font-size:.7rem;color:var(--text-muted);">Fired: ${r.execution_count}</span>
+            <span style="font-size:.7rem;font-weight:700;color:${sc};">${st}</span>
           </div>
         </div>`;
       });
@@ -4411,7 +4391,7 @@ table.journal-table td {
       const holds = entries.filter(([, sig]) => sig.action === 'HOLD');
 
       const cachedBadge = isCached
-        ? '<span style="font-size:.6rem;background:rgba(177,78,255,.15);color:var(--purple);padding:.1rem .4rem;border-radius:6px;margin-left:.4rem;">FROM DB</span>'
+        ? '<span style="font-size:.68rem;background:rgba(177,78,255,.15);color:var(--purple);padding:.1rem .4rem;border-radius:6px;margin-left:.4rem;">FROM DB</span>'
         : '';
 
       let html = '';
@@ -4458,7 +4438,7 @@ table.journal-table td {
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:.4rem;">
               <div style="font-size:.7rem;color:var(--text-muted);line-height:1.4;flex:1;">${reason}</div>
-              ${(sig.latest_at || (isCached && sig.created_at)) ? '<span style="font-size:.6rem;color:var(--text-muted);white-space:nowrap;margin-left:.5rem;">🕐 ' + fmtNewsTime(sig.latest_at || sig.created_at) + '</span>' : ''}
+              ${(sig.latest_at || (isCached && sig.created_at)) ? '<span style="font-size:.68rem;color:var(--text-muted);white-space:nowrap;margin-left:.5rem;">🕐 ' + fmtNewsTime(sig.latest_at || sig.created_at) + '</span>' : ''}
             </div>
           </div>`;
       }).join('');
@@ -4487,7 +4467,7 @@ table.journal-table td {
                 <span>Net: ${((sig.net_score || 0) * 100).toFixed(0)}%</span>
                 ${sig.latest_at ? '<span>🕐 ' + fmtNewsTime(sig.latest_at) + '</span>' : ''}
               </div>
-              <div style="font-size:.65rem;color:var(--text-muted);line-height:1.3;">${reason}</div>
+              <div style="font-size:.7rem;color:var(--text-muted);line-height:1.3;">${reason}</div>
             </div>`;
         }).join('');
       }
@@ -4551,13 +4531,13 @@ table.journal-table td {
             <div style="flex:1;min-width:0;">
               <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.25rem;">
                 <span class="sentiment-badge ${sentCls}">${sentiment}</span>
-                ${action && action !== 'HOLD' ? `<span class="sentiment-badge ${action === 'BUY' ? 'bullish' : action === 'SELL' ? 'bearish' : 'neutral'}" style="font-size:.6rem;">${action}</span>` : ''}
-                ${confidence ? `<span style="font-size:.65rem;color:var(--text-muted);">Conf: ${confidence}</span>` : ''}
-                ${impact ? `<span style="font-size:.65rem;color:var(--yellow);">${impact}</span>` : ''}
-                ${eventType && eventType !== 'OTHER' ? `<span style="font-size:.6rem;padding:.1rem .4rem;border-radius:8px;background:rgba(168,85,247,.12);color:var(--purple);">${eventType.replace(/_/g,' ')}</span>` : ''}
+                ${action && action !== 'HOLD' ? `<span class="sentiment-badge ${action === 'BUY' ? 'bullish' : action === 'SELL' ? 'bearish' : 'neutral'}" style="font-size:.68rem;">${action}</span>` : ''}
+                ${confidence ? `<span style="font-size:.7rem;color:var(--text-muted);">Conf: ${confidence}</span>` : ''}
+                ${impact ? `<span style="font-size:.7rem;color:var(--yellow);">${impact}</span>` : ''}
+                ${eventType && eventType !== 'OTHER' ? `<span style="font-size:.68rem;padding:.1rem .4rem;border-radius:8px;background:rgba(168,85,247,.12);color:var(--purple);">${eventType.replace(/_/g,' ')}</span>` : ''}
               </div>
               <div style="font-size:.85rem;font-weight:600;margin-bottom:.2rem;line-height:1.3;">${article.headline || ''}</div>
-              <div style="display:flex;gap:.75rem;font-size:.65rem;color:var(--text-muted);">
+              <div style="display:flex;gap:.75rem;font-size:.7rem;color:var(--text-muted);">
                 <span>${source}</span>
                 <span>${time}</span>
                 ${symbols ? `<span style="color:var(--gold);">${symbols}</span>` : ''}
@@ -4996,8 +4976,8 @@ table.journal-table td {
           'PF: <strong>' + d.profit_factor + '</strong> \u00b7 ' +
           'P&L: <strong style="color:' + (d.total_pnl_money >= 0 ? 'var(--green)' : 'var(--red)') + '">$' + d.total_pnl_money + '</strong><br>' +
           paramStr +
-          (d.sl_pips ? ' <span style="font-size:.6rem;color:var(--text-muted);">SL:' + d.sl_pips + '</span>' : '') +
-          (d.tp_pips ? ' <span style="font-size:.6rem;color:var(--text-muted);">TP:' + d.tp_pips + '</span>' : '');
+          (d.sl_pips ? ' <span style="font-size:.68rem;color:var(--text-muted);">SL:' + d.sl_pips + '</span>' : '') +
+          (d.tp_pips ? ' <span style="font-size:.68rem;color:var(--text-muted);">TP:' + d.tp_pips + '</span>' : '');
         document.getElementById('btParamModeCards').style.display = 'block'; document.getElementById('btParamModeEmpty').style.display = 'none';
         setBtParamMode('default');
       } else {
@@ -5212,7 +5192,7 @@ table.journal-table td {
       }
       document.getElementById('optResultsArea').style.display = 'block';
       window._lastOptResults = data; // cache for Save to Bank
-      const stoppedBadge = wasStopped ? ' <span style="background:rgba(255,71,87,.15);color:var(--red);padding:.1rem .4rem;border-radius:4px;font-size:.65rem;font-weight:600;">PARTIAL — Stopped early</span>' : '';
+      const stoppedBadge = wasStopped ? ' <span style="background:rgba(255,71,87,.15);color:var(--red);padding:.1rem .4rem;border-radius:4px;font-size:.7rem;font-weight:600;">PARTIAL — Stopped early</span>' : '';
       document.getElementById('optRankedBy').innerHTML = data.target_metric + stoppedBadge;
 
       // Best result card
@@ -5330,18 +5310,18 @@ table.journal-table td {
       for (const s of data.strategies) {
         const params = s.params || {};
         const paramStr = Object.entries(params).map(([k,v]) =>
-          `<span style="font-size:.65rem;background:rgba(255,184,0,.08);padding:.1rem .3rem;border-radius:4px;">${k}:${v}</span>`
+          `<span style="font-size:.7rem;background:rgba(255,184,0,.08);padding:.1rem .3rem;border-radius:4px;">${k}:${v}</span>`
         ).join(' ');
         const savedDate = new Date(s.created_at);
         const ageDays = Math.floor((Date.now() - savedDate.getTime()) / 86400000);
         const dateStr = savedDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
         const isStale = ageDays > STALE_DAYS;
         const activeStyle = s.is_active ? '' : 'opacity:.45;';
-        const staleBadge = isStale ? `<span style="color:var(--red);font-size:.65rem;" title="${ageDays} days old">⚠️ Stale</span>` :
-          `<span style="color:var(--green);font-size:.65rem;">✅ Fresh</span>`;
+        const staleBadge = isStale ? `<span style="color:var(--red);font-size:.7rem;" title="${ageDays} days old">⚠️ Stale</span>` :
+          `<span style="color:var(--green);font-size:.7rem;">✅ Fresh</span>`;
         const activeBadge = s.is_active ?
-          `<span style="background:rgba(0,230,118,.12);color:var(--green);padding:.1rem .35rem;border-radius:4px;font-size:.6rem;font-weight:600;">ACTIVE</span>` :
-          `<span style="background:rgba(255,255,255,.05);color:var(--text-muted);padding:.1rem .35rem;border-radius:4px;font-size:.6rem;">REPLACED</span>`;
+          `<span style="background:rgba(0,230,118,.12);color:var(--green);padding:.1rem .35rem;border-radius:4px;font-size:.68rem;font-weight:600;">ACTIVE</span>` :
+          `<span style="background:rgba(255,255,255,.05);color:var(--text-muted);padding:.1rem .35rem;border-radius:4px;font-size:.68rem;">REPLACED</span>`;
 
         html += `<tr style="${activeStyle}">
           <td style="font-weight:700;color:var(--gold);">${s.symbol}</td>
@@ -5356,8 +5336,8 @@ table.journal-table td {
           <td style="font-size:.7rem;">${dateStr}<br>${staleBadge}</td>
           <td>${activeBadge}</td>
           <td style="white-space:nowrap;">
-            <button onclick="testFromBank('${s.strategy_name}','${s.symbol}','${s.timeframe}','${s.id}')" style="background:rgba(255,184,0,.1);color:var(--gold);border:1px solid rgba(255,184,0,.2);border-radius:5px;padding:.2rem .5rem;font-size:.65rem;cursor:pointer;font-weight:600;margin-right:.3rem;" title="Load into Backtest">🔬 Test</button>
-            <button onclick="deleteFromBank('${s.id}')" style="background:rgba(255,71,87,.1);color:var(--red);border:1px solid rgba(255,71,87,.2);border-radius:5px;padding:.2rem .5rem;font-size:.65rem;cursor:pointer;font-weight:600;" title="Delete">🗑</button>
+            <button onclick="testFromBank('${s.strategy_name}','${s.symbol}','${s.timeframe}','${s.id}')" style="background:rgba(255,184,0,.1);color:var(--gold);border:1px solid rgba(255,184,0,.2);border-radius:5px;padding:.2rem .5rem;font-size:.7rem;cursor:pointer;font-weight:600;margin-right:.3rem;" title="Load into Backtest">🔬 Test</button>
+            <button onclick="deleteFromBank('${s.id}')" style="background:rgba(255,71,87,.1);color:var(--red);border:1px solid rgba(255,71,87,.2);border-radius:5px;padding:.2rem .5rem;font-size:.7rem;cursor:pointer;font-weight:600;" title="Delete">🗑</button>
           </td>
         </tr>`;
       }
