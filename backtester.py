@@ -698,6 +698,24 @@ class BacktestEngine:
         # reverted). 0 / absent = no time-stop (unchanged behaviour).
         max_hold_bars = int(getattr(strategy, "max_hold_bars", 0) or 0)
 
+        # ── Live-parity gates ─────────────────────────────────────────
+        # The live engine blocks entries (a) outside the configured trading
+        # hours and (b) during the post-stop-loss cooldown. A backtest that
+        # ignores those trades a completely different system (e.g. 24h gold
+        # churn with instant re-entry after every stop-out).
+        _TF_MINUTES = {
+            "M1": 1, "M5": 5, "M15": 15, "M30": 30,
+            "H1": 60, "H4": 240, "D1": 1440,
+        }
+        tf_minutes = _TF_MINUTES.get(result.timeframe, 1)
+        cooldown_min = float(getattr(self.config, "sl_cooldown_min", 0) or 0)
+        cooldown_bars = int(round(cooldown_min / tf_minutes)) if cooldown_min > 0 else 0
+        hour_start = int(getattr(self.config, "trade_hour_start", 0) or 0)
+        hour_end = int(getattr(self.config, "trade_hour_end", 24) or 24)
+        # NOTE: candle timestamps are broker-SERVER time (often UTC+2/3),
+        # while the live gate uses true UTC — treat session results as
+        # directional, not exact (calibrate hours from live exports).
+
         # ── 2. Resolve the broker's real symbol name & enable it ─────
         # Brokers decorate instruments with prefixes/suffixes (GBPJPY →
         # GBPJPY.r, GBPJPYm …) and copy_rates_range fails with
@@ -754,27 +772,54 @@ class BacktestEngine:
             raise ValueError(f"Cannot get symbol info for {broker_symbol}")
         point = sym_info.point
         digits = sym_info.digits
-        # Accurate pip value in account currency for 1.0 lot, derived from the
-        # broker's own tick data (same formula as RiskManager). This is correct
-        # for ALL instruments — majors, JPY pairs, crosses and metals (gold) —
-        # instead of the old hardcoded $10/pip which was only right for
-        # USD-quoted majors.
-        pip_points = 10 if digits in (3, 5) else 1
-        if sym_info.trade_tick_size and sym_info.trade_tick_size > 0:
+        # ── ONE pip definition, identical to utils.pips_to_price /
+        # price_to_pips (JPY pairs: 100 points, everything else: 10 points).
+        # The old "pip_points = 10 if digits in (3,5) else 1" disagreed with
+        # utils by exactly 10× on 2-digit symbols like gold, which inflated
+        # the spread charge 10× and shrank the $-per-pip 10× — every gold
+        # trade "lost" ~$6.40 regardless of direction (0% win-rate exports).
+        pip_size_price = 100 * point if "JPY" in result.symbol.upper() else 10 * point
+        pip_points = pip_size_price / point if point > 0 else 10.0  # points per pip
+
+        # $ per pip for 1.0 lot.
+        # For USD-quoted symbols (EURUSD, GBPUSD, XAUUSD…) the exact value is
+        # contract_size × pip_size — broker tick data is redundant there, and
+        # some feeds report a bogus trade_tick_value while the market is
+        # closed (MetaQuotes demo gold returns 0.1 instead of 1.0 on
+        # weekends). For cross-quoted symbols (EURJPY…) tick data is the only
+        # way to convert the quote currency, so use it there.
+        contract = float(getattr(sym_info, "trade_contract_size", 0) or 0)
+        if result.symbol.upper().endswith("USD") and contract > 0:
+            pip_value_per_lot = contract * pip_size_price
+        elif sym_info.trade_tick_size and sym_info.trade_tick_size > 0 \
+                and sym_info.trade_tick_value > 0:
             pip_value_per_lot = (
-                sym_info.trade_tick_value * (pip_points * point) / sym_info.trade_tick_size
+                sym_info.trade_tick_value * pip_size_price / sym_info.trade_tick_size
             )
         else:
             pip_value_per_lot = 10.0  # fallback only if broker data missing
         if pip_value_per_lot <= 0:
             pip_value_per_lot = 10.0
 
-        # Spread cost (entry pays the spread). Historical spread isn't in candle
-        # data, so we charge the current spread on every trade — a realistic,
-        # slightly conservative cost that the old engine ignored entirely.
+        # Spread cost (entry pays the spread). Historical spread isn't in
+        # candle data, so we charge the broker's CURRENT spread per trade —
+        # but capped at config.max_spread_points: sym_info.spread is a live
+        # snapshot, and on a closed market brokers blow it out (weekend gold
+        # = 640 points = $6.40!). Live trading never opens a position above
+        # the max_spread_points gate (RiskManager), so the simulation must
+        # not charge more than that either.
         spread_pips = 0.0
         if point > 0 and getattr(sym_info, "spread", 0):
-            spread_pips = sym_info.spread / pip_points  # spread is in points
+            max_spread = float(getattr(self.config, "max_spread_points", 30) or 30)
+            spread_points = min(float(sym_info.spread), max_spread)
+            spread_pips = spread_points / pip_points
+        logger.info(
+            "Backtest units for %s: point=%s pip=%s $/pip/lot=%.2f "
+            "spread=%.1f pips (broker snapshot %s points, capped at "
+            "max_spread_points)",
+            result.symbol, point, pip_size_price, pip_value_per_lot,
+            spread_pips, getattr(sym_info, "spread", 0),
+        )
 
         # ── 5. Walk bar-by-bar ───────────────────────────────────────
         WARMUP = min(200, total_bars // 3)  # indicator warm-up period
@@ -784,6 +829,7 @@ class BacktestEngine:
         equity_curve: list[dict] = []
         trade_counter = 0
         pending_signal = None  # signal waiting to be executed on next bar
+        cooldown_until_index = -1  # no entries until this bar (post-SL cooldown)
 
         for i in range(WARMUP, total_bars):
             bar = df.iloc[i]
@@ -850,6 +896,14 @@ class BacktestEngine:
                     pnl_money = pnl_pips * pip_value_per_lot * trade["lot_size"]
                     equity += pnl_money
 
+                    # Post-loss cooldown (mirrors the live engine): a losing
+                    # stop-out blocks new entries for a while, killing the
+                    # "stopped out, re-enter the same move next bar" churn.
+                    if cooldown_bars and exit_reason == "SL" and pnl_money < 0:
+                        cooldown_until_index = max(
+                            cooldown_until_index, i + cooldown_bars,
+                        )
+
                     closed_trades.append(BacktestTrade(
                         trade_id=trade["id"],
                         entry_time=trade["entry_time"],
@@ -880,7 +934,15 @@ class BacktestEngine:
                 signal = None
 
             if signal and signal.action in (SignalAction.BUY, SignalAction.SELL):
-                pending_signal = signal  # will execute on next bar's open
+                # Live-parity gates: trading-hours window + post-SL cooldown.
+                bar_hour = int(bar["time"].hour)
+                in_hours = (
+                    (hour_start <= bar_hour < hour_end)
+                    if hour_start <= hour_end
+                    else (bar_hour >= hour_start or bar_hour < hour_end)
+                )
+                if in_hours and i >= cooldown_until_index:
+                    pending_signal = signal  # will execute on next bar's open
 
             # ── 5d. Record equity ────────────────────────────────────
             # Include unrealised P&L from open trades

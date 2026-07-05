@@ -1157,12 +1157,14 @@ class MultiBotManager:
                 sym_info = self.market_data.get_symbol_info(bot.symbol)
                 if trade_row and sym_info and trade_row.get("entry_price"):
                     point = sym_info["point"]
-                    pip_size = point * 10 if sym_info.get("digits", 5) in (3, 5) else point
                     diff = exit_price - trade_row["entry_price"]
                     # SELL trades profit when price falls
                     if trade_row["action"] == "SELL":
                         diff = -diff
-                    pips = round(diff / pip_size, 1) if pip_size else None
+                    # Same pip definition as order placement (utils) — the old
+                    # inline "pip = point unless 3/5 digits" reported gold
+                    # pips 10× inflated vs the pips the SL/TP were placed with.
+                    pips = round(price_to_pips(diff, bot.symbol, point), 1)
             except Exception:
                 pips = None
 

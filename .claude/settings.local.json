@@ -13,7 +13,9 @@
       "Bash(git push *)",
       "PowerShell(graphify update .)",
       "PowerShell(python -m py_compile dashboard.py)",
-      "PowerShell(if \\($?\\) { \"compile OK\" })"
+      "PowerShell(if \\($?\\) { \"compile OK\" })",
+      "PowerShell($body = @{strategy='scalper'; symbol='XAUUSD'; timeframe='M1'; date_from='2026-06-22'; date_to='2026-07-03'; initial_balance=10000; lot_size=0.1; sl_pips=8; tp_pips=5} | ConvertTo-Json; $r = Invoke-RestMethod -Uri 'http://localhost:5000/api/backtest/run' -Method Post -Body $body -ContentType 'application/json'; $r.run_id)",
+      "PowerShell(python -m py_compile backtester.py)"
     ]
   }
 }
