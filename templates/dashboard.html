@@ -186,7 +186,7 @@ a { color: var(--gold); text-decoration: none; }
 .market-status.open .status-dot  { background: var(--green); animation: pulse 1.8s infinite; }
 .market-status.closed .status-dot { background: var(--red); }
 
-.session-badges { display: flex; gap: .35rem; }
+.session-badges { display: flex; gap: .35rem; flex-wrap: wrap; }
 .session-badge {
   padding: .2rem .6rem; border-radius: 12px;
   font-size: .7rem; font-weight: 600;
@@ -229,7 +229,14 @@ a { color: var(--gold); text-decoration: none; }
 }
 @media (max-width: 640px) {
   .topbar { flex-direction: column; gap: .75rem; padding: .6rem 1rem; }
-  .topbar-right { justify-content: center; }
+  /* "center" alone pushes overflow off BOTH edges when a row is wider than
+     the window — Balance/Equity ended up at negative x, invisible. "safe
+     center" (with flex-start fallback) keeps the left edge on screen. */
+  .topbar-right {
+    justify-content: flex-start;
+    justify-content: safe center;
+    width: 100%;
+  }
   .main-grid { padding: .75rem; gap: .75rem; }
 }
 
