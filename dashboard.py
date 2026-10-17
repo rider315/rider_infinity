@@ -8,14 +8,18 @@ information, open positions, session status, and the trade journal.
 Run standalone:
     python dashboard.py
 
-The server binds to http://localhost:5000 by default.
+The server binds to http://127.0.0.1:5000 by default and is protected by
+:mod:`web_security` — see that module for the ``DASHBOARD_*`` settings
+that control the listen address and credentials.
 """
 
 from __future__ import annotations
 
 import csv
 import logging
+import os
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,7 +27,8 @@ from typing import Any
 from flask import Flask, Response, jsonify, render_template, request
 
 import performance
-from config import Config, SYMBOL_GROUPS, TIMEFRAME_OPTIONS, TIMEFRAME_MAP
+import web_security
+from config import Config, ConfigError, SYMBOL_GROUPS, TIMEFRAME_OPTIONS, TIMEFRAME_MAP
 from market_data import MarketDataFeed
 from mt5_connector import MT5Connector
 from multi_bot import BotInstance, BotStatus, MultiBotManager
@@ -44,6 +49,14 @@ _bot_mgr: MultiBotManager | None = None
 _news_engine: Any | None = None  # NewsIntelligenceEngine (lazy import)
 _trailing_positions: dict = {}  # ticket -> {profile, params, enabled}
 
+# Guards ``_init_subsystems`` against running twice in one process.  The
+# Werkzeug reloader re-executes this module in a child process, and a
+# second initialisation would open a second MT5 connection and start a
+# second thread for every auto-started bot — i.e. duplicate live orders
+# on one account.  See ``main()``.
+_init_lock = threading.Lock()
+_initialised: bool = False
+
 logger = setup_logger("dashboard")
 
 # ── Paths ─────────────────────────────────────────────────────────────
@@ -62,6 +75,11 @@ def create_app() -> Flask:
         template_folder=str(_PROJECT_ROOT / "templates"),
         static_folder=str(_PROJECT_ROOT / "static"),
     )
+
+    # ── Access control ────────────────────────────────────────────────
+    # Must be installed before any route runs: these endpoints can place
+    # orders, flip bots to live and close every position.
+    web_security.install_auth(app)
 
     # ── Page route ────────────────────────────────────────────────────
 
@@ -699,8 +717,18 @@ def create_app() -> Flask:
             data = request.get_json(force=True) or {}
             symbol = data.get("symbol", "EURUSD")
             action = data.get("action", "BUY").upper()
-            lot = float(data.get("lot", 0.01))
+            try:
+                lot = float(data.get("lot", 0.01))
+            except (TypeError, ValueError):
+                return jsonify({"error": "lot must be a number."}), 400
             dry_run = bool(data.get("dry_run", True))
+
+            if action not in ("BUY", "SELL"):
+                return jsonify({
+                    "error": f"action must be BUY or SELL, got {action!r}."
+                }), 400
+            if not lot > 0:
+                return jsonify({"error": "lot must be greater than zero."}), 400
 
             # Ensure symbol is available (resolves broker suffixes,
             # e.g. EURUSD -> EURUSD.a / EURUSDm), then use the real name.
@@ -756,7 +784,35 @@ def create_app() -> Flask:
                     **result_info,
                 })
 
-            # LIVE test trade
+            # LIVE test trade — a real order on a real account, so it goes
+            # through exactly the same pre-flight gate as a bot's trade.
+            # Previously this endpoint built its own live OrderManager and
+            # skipped the risk layer entirely, so it could place any volume
+            # regardless of spread, drawdown or position limits.
+            can, reason = _risk_mgr.can_trade(symbol, lot)
+            if not can:
+                logger.warning(
+                    "[TEST-LIVE] blocked by risk manager: %s", reason,
+                )
+                return jsonify({
+                    "error": f"Blocked by risk manager: {reason}",
+                    "blocked": True,
+                    **result_info,
+                }), 409
+
+            lot, cap_note = _risk_mgr.cap_lot_for_max_loss(
+                symbol, sl_pips, lot,
+            )
+            if lot <= 0:
+                return jsonify({
+                    "error": f"Blocked by per-trade loss cap: {cap_note}",
+                    "blocked": True,
+                    **result_info,
+                }), 409
+            result_info["lot"] = lot
+            if cap_note != "OK":
+                logger.info("[TEST-LIVE] lot adjusted: %s", cap_note)
+
             order_mgr_live = OrderManager(_config, dry_run=False)
             result = order_mgr_live.open_position(
                 symbol=symbol,
@@ -1717,10 +1773,40 @@ def _serialise_bot(bot: BotInstance) -> dict[str, Any]:
 #  Initialisation & Entry Point
 # =====================================================================
 
-def _init_subsystems() -> None:
-    """Initialise all bot subsystems and store them at module level."""
+def _init_subsystems(require_mt5: bool = True) -> None:
+    """Initialise all bot subsystems and store them at module level.
+
+    Idempotent: a second call in the same process is a no-op.  That
+    matters because the Werkzeug reloader re-executes this module in a
+    child process — without the guard the parent and the child would each
+    hold an MT5 connection and each start a thread per auto-started bot,
+    doubling every order the fleet places.
+
+    Parameters
+    ----------
+    require_mt5 : bool
+        When ``True`` (the default, used by ``python dashboard.py``) a
+        failed MT5 connection raises :class:`ConnectionError` so the
+        operator sees it at startup rather than as a wall of failing API
+        calls.  When ``False`` (used by the WSGI entry point, where
+        exiting the worker is not useful) the app still starts, and
+        ``/api/terminal-status`` reports the broken connection.
+
+    Raises
+    ------
+    ConfigError
+        Mandatory settings are missing or malformed.
+    ConnectionError
+        MT5 could not be reached and *require_mt5* is ``True``.
+    """
     global _config, _connector, _market_data, _session_mgr
-    global _order_mgr, _risk_mgr, _bot_mgr, _news_engine
+    global _order_mgr, _risk_mgr, _bot_mgr, _news_engine, _initialised
+
+    with _init_lock:
+        if _initialised:
+            logger.debug("Subsystems already initialised — skipping.")
+            return
+        _initialised = True
 
     logger.info("Loading configuration …")
     _config = Config()
@@ -1729,9 +1815,19 @@ def _init_subsystems() -> None:
     logger.info("Connecting to MT5 …")
     _connector = MT5Connector(_config)
     if not _connector.connect():
-        logger.error("Failed to connect to MT5. Exiting.")
-        sys.exit(1)
-    logger.info("MT5 connected successfully.")
+        if require_mt5:
+            raise ConnectionError(
+                "Could not connect to the MetaTrader 5 terminal. Check "
+                "MT5_PATH, MT5_LOGIN, MT5_SERVER and that the terminal is "
+                "running and logged in."
+            )
+        logger.error(
+            "MT5 connection FAILED — starting in a degraded state. Account, "
+            "position and order endpoints will return errors until the "
+            "terminal is reachable; see /api/terminal-status.",
+        )
+    else:
+        logger.info("MT5 connected successfully.")
 
     _market_data = MarketDataFeed()
     _session_mgr = SessionManager()
@@ -2009,9 +2105,6 @@ def _init_news_engine(config: Config) -> dict | None:
 
 def main() -> None:
     """Entry point — print banner, initialise, and run the Flask server."""
-    import os
-    import sys
-    import threading
     import webbrowser
 
     # Windows consoles often run cp1252, which can't encode unicode output
@@ -2035,26 +2128,53 @@ def main() -> None:
     """
     print(banner)
 
-    _init_subsystems()
+    # Resolve the listen address BEFORE touching MT5 so an unsafe
+    # bind/debug combination fails instantly instead of after a
+    # connection and a fleet of bot threads are already up.
+    try:
+        host, port, debug = web_security.resolve_bind()
+    except web_security.InsecureConfigError as exc:
+        print(f"\n  [SECURITY] {exc}\n")
+        sys.exit(2)
+
+    # With the reloader on, Werkzeug runs this module in two processes: a
+    # monitor parent and the serving child (marked WERKZEUG_RUN_MAIN).
+    # Only the serving process may own the MT5 connection and the bot
+    # threads — if both did, every auto-started bot would run twice and
+    # place duplicate orders on one account.
+    use_reloader = debug
+    serving = (not use_reloader
+               or os.environ.get("WERKZEUG_RUN_MAIN") == "true")
+
+    if serving:
+        try:
+            _init_subsystems(require_mt5=True)
+        except (ConfigError, ConnectionError) as exc:
+            print(f"\n  [STARTUP FAILED] {exc}\n")
+            sys.exit(1)
 
     app = create_app()
 
-    url = "http://localhost:5000"
+    display_host = "localhost" if web_security.is_loopback(host) else host
+    url = f"http://{display_host}:{port}"
     print("\n" + "=" * 52)
     print(f"  Dashboard running at {url}")
-    print("  Opening browser automatically ...")
+    if os.getenv("DASHBOARD_PASSWORD"):
+        print(f"  Login: user '{os.getenv('DASHBOARD_USER', 'rider')}'")
+    else:
+        print("  No DASHBOARD_PASSWORD set - loopback only, no login.")
     print("  Press Ctrl+C to stop the server.")
     print("=" * 52 + "\n")
 
-    # Auto-open browser only once (skip in Flask reloader's child process)
+    # Auto-open the browser once — never from the reloader's child.
     if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
     app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=True,
-        use_reloader=True,
+        host=host,
+        port=port,
+        debug=debug,
+        use_reloader=use_reloader,
         threaded=True,
     )
 

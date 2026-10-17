@@ -39,7 +39,7 @@ except ImportError:
 
 import MetaTrader5 as mt5
 
-from config import Config, SYMBOL_GROUPS, TIMEFRAME_OPTIONS, TIMEFRAME_MAP
+from config import Config, ConfigError, SYMBOL_GROUPS, TIMEFRAME_OPTIONS, TIMEFRAME_MAP
 from mt5_connector import MT5Connector
 from market_data import MarketDataFeed
 from order_manager import OrderManager
@@ -1289,7 +1289,11 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    bot = RiderInfinityBot()
+    try:
+        bot = RiderInfinityBot()
+    except ConfigError as exc:
+        print(f"{Fore.RED}[CONFIG ERROR] {exc}{Style.RESET_ALL}")
+        sys.exit(1)
 
     # If any strategy was given on CLI, pass args to skip menus.
     bot.run(args=args if args.strategy else None)

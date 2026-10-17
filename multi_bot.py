@@ -146,6 +146,12 @@ class MultiBotManager:
         self._persist_path = Path(__file__).resolve().parent / "data" / "bot_configs.json"
         self._loading: bool = False  # suppress saves during _load_bots
         self.history_db = BotHistoryDB()
+        # Whether a position with no RI magic number (i.e. opened manually
+        # in the terminal) may be adopted and managed by the bot on that
+        # symbol. See ``_owns_position``.
+        self._adopt_untagged: bool = getattr(
+            config, "adopt_untagged_positions", False,
+        )
 
     # ------------------------------------------------------------------
     # Bot lifecycle
@@ -826,16 +832,75 @@ class MultiBotManager:
             )
             logger.error("Bot#%d order failed: %s", bot.bot_id, bot.blocked_reason)
 
+    def _sole_bot_on_symbol(self, bot: BotInstance) -> bool:
+        """Return ``True`` if no other registered bot trades *bot*'s symbol.
+
+        Used to decide whether an RI-placed position whose comment the
+        broker mangled can be attributed unambiguously.
+        """
+        with self._lock:
+            return not any(
+                other.bot_id != bot.bot_id and other.symbol == bot.symbol
+                for other in self._bots.values()
+            )
+
+    def _owns_position(self, bot: BotInstance, pos) -> bool:
+        """Decide whether *pos* is this bot's to manage.
+
+        Ownership matters because the caller acts on the result: it applies
+        breakeven, the time-stop and Quick Exit to every position it claims,
+        and records the close in the trade history.  Claiming someone
+        else's position therefore means force-closing it and double-counting
+        it.
+
+        Resolution order (first decisive test wins):
+
+        1. **Comment names this bot** (``Bot#<id>|<strategy>``) — placed by
+           this bot, definitive.
+        2. **Comment names a different bot** — not ours, definitive.
+        3. **Ticket is already tracked** — we opened it and recorded the
+           ticket, so a comment the broker truncated or rewrote cannot
+           orphan it.
+        4. **Magic number matches and this is the only bot on the symbol**
+           — placed by this RI instance and no sibling could claim it, so
+           adopt it (this is what keeps positions opened before a restart
+           or a code update under management).
+        5. Otherwise **not ours**.  That includes manual positions and any
+           position on a symbol two bots share but which neither opened,
+           because guessing would let two bots manage one position — the
+           old behaviour, which claimed anything not explicitly tagged by
+           another bot, meant both bots applied the time-stop to it and
+           both wrote its close to the history DB.
+
+        Set ``ADOPT_UNTAGGED_POSITIONS=true`` to also adopt positions with
+        no RI magic number (manual trades on the bot's symbol).  Off by
+        default: a manually opened trade would otherwise inherit the bot's
+        time-stop and Quick Exit and be closed out from under the operator.
+        """
+        comment = pos.comment or ""
+        if comment.startswith(f"Bot#{bot.bot_id}|"):
+            return True
+        if comment.startswith("Bot#"):
+            return False
+        if pos.ticket in bot.active_tickets:
+            return True
+
+        magic_matches = getattr(pos, "magic", 0) == self.config.magic_number
+        if magic_matches and self._sole_bot_on_symbol(bot):
+            return True
+        if not magic_matches and self._adopt_untagged:
+            return self._sole_bot_on_symbol(bot)
+        return False
+
     def _sync_position_state(self, bot: BotInstance, logger: logging.Logger) -> None:
         """Sync the bot's active positions from MT5.
 
-        Discovers ALL open positions that belong to this bot by querying MT5
-        for the bot's symbol and matching via comment pattern (``Bot#ID|...``)
-        or magic number.  This ensures positions opened before the code update,
-        or between restarts, are still tracked correctly.
+        Discovers the open positions that belong to this bot (see
+        :meth:`_owns_position` for the ownership rule) and refreshes the
+        bot's tracked ticket list and dashboard fields.
 
-        When a trade is closed from the MT5 terminal (externally), this method
-        detects it and clears stale SL/TP/Entry values from the dashboard.
+        When a trade is closed from the MT5 terminal (externally), this
+        method detects it and clears stale SL/TP/Entry values.
         """
         # Nothing to sync if bot is in dry-run mode
         if bot.dry_run:
@@ -847,19 +912,12 @@ class MultiBotManager:
             if all_positions is None:
                 all_positions = ()
 
-            comment_prefix = f"Bot#{bot.bot_id}|"
             still_open = []
             active_pos_data = []
 
             for pos in all_positions:
-                # Include ALL positions on this symbol UNLESS the comment
-                # explicitly claims a DIFFERENT bot (e.g. "Bot#2|ema").
-                # This catches positions opened by the bot, manually from
-                # the terminal, or with broker-modified comments.
-                comment = pos.comment or ""
-                if (comment.startswith("Bot#")
-                        and not comment.startswith(comment_prefix)):
-                    continue  # belongs to a different RI bot
+                if not self._owns_position(bot, pos):
+                    continue
 
                 still_open.append(pos.ticket)
                 pos_type = "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL"
