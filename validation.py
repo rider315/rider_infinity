@@ -45,6 +45,7 @@ import pandas as pd
 from backtest_core import (
     pip_value_per_lot as _pip_value_per_lot,
     run_single as _run_backtest,
+    spread_pips_from_symbol as _spread_pips_from_symbol,
 )
 from backtester import (
     MonteCarloResult,
@@ -74,17 +75,20 @@ class MarketSlice:
     ----------
     df : pandas.DataFrame
         OHLCV bars, columns ``time, open, high, low, close, volume``.
-    symbol, point, digits, pip_value
-        Symbol metadata resolved from the broker.
+    symbol, point, digits, pip_value, spread_pips
+        Symbol metadata resolved from the broker, including the
+        per-trade spread cost every run here charges.
     """
 
     def __init__(self, df: pd.DataFrame, symbol: str, point: float,
-                 digits: int, pip_value: float) -> None:
+                 digits: int, pip_value: float,
+                 spread_pips: float = 0.0) -> None:
         self.df = df
         self.symbol = symbol
         self.point = point
         self.digits = digits
         self.pip_value = pip_value
+        self.spread_pips = spread_pips
 
     def __len__(self) -> int:
         return len(self.df)
@@ -155,12 +159,19 @@ def fetch_slice(
         tick_size=getattr(sym_info, "trade_tick_size", 0) or 0,
     )
 
+    spread_pips = _spread_pips_from_symbol(
+        getattr(sym_info, "spread", 0), broker_symbol, sym_info.point,
+    )
+
     logger.info(
-        "Fetched %d bars for %s %s (%s → %s).",
+        "Fetched %d bars for %s %s (%s → %s); $/pip/lot=%.2f "
+        "spread=%.2f pips.",
         len(df), broker_symbol, timeframe, date_from, date_to,
+        pip_value, spread_pips,
     )
     return MarketSlice(
         df, broker_symbol, sym_info.point, sym_info.digits, pip_value,
+        spread_pips=spread_pips,
     )
 
 
@@ -187,6 +198,7 @@ def make_backtest_fn(
             default_sl=config.default_sl_pips,
             default_tp=config.default_tp_pips,
             max_open_trades=max_open_trades,
+            spread_pips=market.spread_pips,
         )
 
     return _fn
@@ -212,6 +224,7 @@ def make_windowed_backtest_fn(
             default_sl=config.default_sl_pips,
             default_tp=config.default_tp_pips,
             max_open_trades=max_open_trades,
+            spread_pips=market.spread_pips,
         )
 
     return _fn

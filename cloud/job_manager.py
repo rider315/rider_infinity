@@ -29,8 +29,13 @@ def serialize_job_data(
     point: float,
     digits: int,
     pip_value_per_lot: float,
+    spread_pips: float = 0.0,
 ) -> tuple[bytes, bytes]:
     """Serialize DataFrame and metadata for upload to S3.
+
+    ``spread_pips`` travels with the job so a cloud worker charges the
+    same cost the local engine does. Without it the fleet ranked every
+    parameter set on gross P&L.
 
     Returns (parquet_bytes, meta_json_bytes).
     """
@@ -43,6 +48,7 @@ def serialize_job_data(
         "point": point,
         "digits": digits,
         "pip_value_per_lot": pip_value_per_lot,
+        "spread_pips": spread_pips,
     }
     meta_bytes = json.dumps(meta).encode()
 

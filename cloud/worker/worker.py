@@ -177,6 +177,9 @@ def _process_batch(message: dict) -> None:
                 default_sl=bt_config["default_sl"],
                 default_tp=bt_config["default_tp"],
                 max_open_trades=bt_config.get("max_open_trades", 5),
+                # Older jobs carry no spread; 0 keeps them runnable but
+                # cost-free, which is what the fleet used to do always.
+                spread_pips=meta.get("spread_pips", 0.0),
             )
             if metrics["total_trades"] >= bt_config.get("min_trades", 3):
                 metrics["params"] = params

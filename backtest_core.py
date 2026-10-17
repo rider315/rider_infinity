@@ -39,6 +39,7 @@ __all__ = [
     "Trade",
     "compute_metrics",
     "run_single",
+    "spread_pips_from_symbol",
     "calc_pnl_money",
     "calc_pnl_pips",
     "check_sl_tp",
@@ -131,6 +132,32 @@ def calc_pnl_pips(
         else entry_price - exit_price
     )
     return price_to_pips(delta, symbol, point)
+
+
+def spread_pips_from_symbol(
+    broker_spread_points: float, symbol: str, point: float,
+    max_spread_points: float = 30.0,
+) -> float:
+    """Per-trade spread cost in pips, from the broker's spread snapshot.
+
+    Historical spread is not in candle data, so a backtest charges the
+    broker's *current* spread — capped at ``max_spread_points``, because
+    ``symbol_info().spread`` is a live snapshot and brokers blow it out on
+    a closed market (weekend gold has been seen at 640 points). Live
+    trading never opens a position above the ``MAX_SPREAD_POINTS`` gate in
+    :class:`~risk_manager.RiskManager`, so the simulation must not charge
+    more than that either.
+
+    Returns ``0.0`` when the point size or the snapshot is unusable, which
+    makes the backtest cost-free — optimistic, so callers should prefer a
+    sane default over passing nothing.
+    """
+    size = pip_size(symbol, point)
+    if size <= 0 or not broker_spread_points:
+        return 0.0
+    points_per_pip = size / point if point > 0 else 10.0
+    capped = min(float(broker_spread_points), float(max_spread_points or 30.0))
+    return capped / points_per_pip
 
 
 def calc_pnl_money(
@@ -323,10 +350,29 @@ def run_single(
     default_sl: float,
     default_tp: float,
     max_open_trades: int = 5,
+    spread_pips: float = 0.0,
+    commission_per_trade: float = 0.0,
 ) -> dict:
     """Run a single backtest with the given params. Returns metrics dict.
 
     This is a pure function — no MT5, no database, no side effects.
+
+    Parameters
+    ----------
+    spread_pips
+        Per-trade spread cost, charged against every closed trade.
+        Derive it with :func:`spread_pips_from_symbol`.
+
+        **Pass it.** The default of 0 makes the run cost-free, which is
+        how this kernel used to behave unconditionally while
+        ``BacktestEngine._execute`` charged the spread — so the
+        parameter sweep and the cloud workers ranked every parameter set
+        on gross P&L. On a 1.5-pip EURUSD spread that overstated a
+        typical run's profit by 20-50%, and more for a scalper whose
+        target is a few pips, so the "best" parameters it saved were
+        chosen partly for trading more often.
+    commission_per_trade
+        Flat commission charged against every closed trade.
     """
     indicator_params = {k: v for k, v in params.items()
                         if k not in ("sl_pips", "tp_pips")}
@@ -385,7 +431,11 @@ def run_single(
                 exit_price, exit_reason = hit
                 pnl_p = calc_pnl_pips(trade["direction"], trade["entry_price"],
                                       exit_price, symbol, point)
-                pnl_money = pnl_p * pip_value_per_lot * lot_size
+                pnl_money = calc_pnl_money(
+                    pnl_p, lot_size, pip_value_per_lot,
+                    spread_pips=spread_pips,
+                    commission=commission_per_trade,
+                )
                 equity += pnl_money
                 closed_trades.append(Trade(
                     pnl_pips=round(pnl_p, 1),
@@ -415,7 +465,11 @@ def run_single(
         for trade in open_trades:
             pnl_p = calc_pnl_pips(trade["direction"], trade["entry_price"],
                                   final["close"], symbol, point)
-            pnl_money = pnl_p * pip_value_per_lot * lot_size
+            pnl_money = calc_pnl_money(
+                pnl_p, lot_size, pip_value_per_lot,
+                spread_pips=spread_pips,
+                commission=commission_per_trade,
+            )
             equity += pnl_money
             closed_trades.append(Trade(
                 pnl_pips=round(pnl_p, 1),

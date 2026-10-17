@@ -34,6 +34,7 @@ from backtester import BacktestDB
 from backtest_core import (
     pip_value_per_lot as _pip_value_per_lot,
     run_single as _backtest_run_single,
+    spread_pips_from_symbol as _spread_pips_from_symbol,
 )
 
 logger = setup_logger("optimizer")
@@ -643,6 +644,17 @@ class StrategyOptimizer:
             tick_value=getattr(sym_info, "trade_tick_value", 0) or 0,
             tick_size=getattr(sym_info, "trade_tick_size", 0) or 0,
         )
+        # Charge the spread, as BacktestEngine does. Without it the sweep
+        # ranks every parameter set on gross P&L and favours whichever
+        # trades most often.
+        spread_pips = _spread_pips_from_symbol(
+            getattr(sym_info, "spread", 0), result.symbol, point,
+            max_spread_points=getattr(self.config, "max_spread_points", 30),
+        )
+        logger.info(
+            "Sweep units for %s: $/pip/lot=%.2f spread=%.2f pips.",
+            result.symbol, pip_value_per_lot, spread_pips,
+        )
 
         # ── 3. Generate parameter combinations ───────────────────────
         combos = self._generate_combos(
@@ -678,6 +690,7 @@ class StrategyOptimizer:
                     initial_balance=result.initial_balance,
                     default_sl=params.get("sl_pips", self.config.default_sl_pips),
                     default_tp=params.get("tp_pips", self.config.default_tp_pips),
+                    spread_pips=spread_pips,
                     max_open_trades=result.max_open_trades,
                 )
                 # Filter combos with too few trades
@@ -745,6 +758,7 @@ class StrategyOptimizer:
         default_sl: float,
         default_tp: float,
         max_open_trades: int = 5,
+        spread_pips: float = 0.0,
     ) -> dict:
         return _backtest_run_single(
             strategy_name=strategy_name, params=params, df=df,
@@ -752,6 +766,7 @@ class StrategyOptimizer:
             pip_value_per_lot=pip_value_per_lot, lot_size=lot_size,
             initial_balance=initial_balance, default_sl=default_sl,
             default_tp=default_tp, max_open_trades=max_open_trades,
+            spread_pips=spread_pips,
         )
 
 

@@ -27,7 +27,10 @@ from typing import Any
 import MetaTrader5 as mt5
 import pandas as pd
 
-from backtest_core import pip_value_per_lot as _pip_value_per_lot
+from backtest_core import (
+    pip_value_per_lot as _pip_value_per_lot,
+    spread_pips_from_symbol as _spread_pips_from_symbol,
+)
 from config import Config, TIMEFRAME_MAP
 from optimizer import PARAM_GRIDS, generate_combos
 
@@ -305,8 +308,15 @@ class CloudOptimizer:
 
         # ── 4. Serialize and upload to S3 ────────────────────────────
         result.status = "uploading"
+        # Same spread the local engine charges, so cloud and local
+        # results are comparable.
+        spread_pips = _spread_pips_from_symbol(
+            getattr(sym_info, "spread", 0), result.symbol, point,
+            max_spread_points=getattr(self.config, "max_spread_points", 30),
+        )
         parquet_bytes, meta_bytes = serialize_job_data(
             df, result.symbol, point, digits, pip_value_per_lot,
+            spread_pips=spread_pips,
         )
 
         self._infra.upload_bytes(

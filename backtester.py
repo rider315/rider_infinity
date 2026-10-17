@@ -37,6 +37,7 @@ from backtest_core import (
     pip_value_per_lot as _pip_value_per_lot,
     profit_factor,
     sharpe_ratio,
+    spread_pips_from_symbol,
 )
 from config import Config, TIMEFRAME_MAP
 from strategies import get_strategy
@@ -791,7 +792,6 @@ class BacktestEngine:
         # made every backtested gold trade "lose" ~$6.40 regardless of
         # direction (the 0% win-rate exports).
         pip_size_price = _pip_size(result.symbol, point)
-        pip_points = pip_size_price / point if point > 0 else 10.0
 
         # $ per pip for 1.0 lot. Prefers contract size for an
         # account-currency-quoted symbol, because some feeds report a
@@ -814,11 +814,10 @@ class BacktestEngine:
         # = 640 points = $6.40!). Live trading never opens a position above
         # the max_spread_points gate (RiskManager), so the simulation must
         # not charge more than that either.
-        spread_pips = 0.0
-        if point > 0 and getattr(sym_info, "spread", 0):
-            max_spread = float(getattr(self.config, "max_spread_points", 30) or 30)
-            spread_points = min(float(sym_info.spread), max_spread)
-            spread_pips = spread_points / pip_points
+        spread_pips = spread_pips_from_symbol(
+            getattr(sym_info, "spread", 0), result.symbol, point,
+            max_spread_points=getattr(self.config, "max_spread_points", 30),
+        )
         logger.info(
             "Backtest units for %s: point=%s pip=%s $/pip/lot=%.2f "
             "spread=%.1f pips (broker snapshot %s points, capped at "
