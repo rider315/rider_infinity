@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 try:
@@ -1252,40 +1252,214 @@ class RiderInfinityBot:
     # ===================================================================
     #  14. OPTIMIZER MENU
     # ===================================================================
+    # ------------------------------------------------------------------
+    # Validation helpers
+    # ------------------------------------------------------------------
+    def _ask_date_range(self, default_days: int = 180) -> tuple[str, str]:
+        """Prompt for an ISO date range, defaulting to the last N days."""
+        from datetime import timedelta
+
+        today = datetime.now(timezone.utc).date()
+        default_from = (today - timedelta(days=default_days)).isoformat()
+        raw_from = input(
+            f"  {Fore.GREEN}From date [{default_from}]: {Style.RESET_ALL}"
+        ).strip() or default_from
+        raw_to = input(
+            f"  {Fore.GREEN}To date [{today.isoformat()}]: {Style.RESET_ALL}"
+        ).strip() or today.isoformat()
+        return raw_from, raw_to
+
+    @staticmethod
+    def _ask_int(prompt: str, default: int) -> int:
+        raw = input(
+            f"  {Fore.GREEN}{prompt} [{default}]: {Style.RESET_ALL}"
+        ).strip()
+        try:
+            return int(raw) if raw else default
+        except ValueError:
+            return default
+
     def optimizer_menu(self) -> None:
-        """Run the genetic optimizer or walk-forward analysis."""
-        print(f"\n  {Fore.CYAN}== Strategy Optimizer =={Style.RESET_ALL}")
-        print(f"  {Fore.WHITE}1. Genetic Optimizer{Style.RESET_ALL}")
-        print(f"  {Fore.WHITE}2. Walk-Forward Analysis{Style.RESET_ALL}")
-        print(f"  {Fore.WHITE}3. Monte Carlo Simulation{Style.RESET_ALL}")
+        """Run a genetic search, walk-forward analysis or Monte Carlo.
+
+        All three are real runs via :mod:`validation`.  This menu used to
+        offer them and then print the import statements the user would
+        need to wire the tools up themselves.
+        """
+        import validation
+
+        print(f"\n  {Fore.CYAN}== Strategy Validation =={Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}1. Genetic Optimizer     "
+              f"{Fore.CYAN}(search params without enumerating the grid)"
+              f"{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}2. Walk-Forward Analysis "
+              f"{Fore.CYAN}(do these params hold up out of sample?)"
+              f"{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}3. Monte Carlo           "
+              f"{Fore.CYAN}(how much of the curve was luck?)"
+              f"{Style.RESET_ALL}")
         print(f"  {Fore.WHITE}0. Back{Style.RESET_ALL}")
 
         choice = input(f"  {Fore.GREEN}> Option: {Style.RESET_ALL}").strip()
+        if choice == "0" or not choice:
+            return
 
-        if choice == "1":
-            if not self.strategy_name:
-                print(f"  {Fore.RED}Select a strategy first (option 4).{Style.RESET_ALL}")
-                return
-            print(f"\n  {Fore.YELLOW}Genetic Optimizer for '{self.strategy_name}'{Style.RESET_ALL}")
-            print(f"  Symbol: {self.symbol}, Timeframe: {self.timeframe_key}")
-            print(f"\n  {Fore.WHITE}Use the optimizer module directly:{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  from optimizer import GeneticOptimizer, GeneticConfig{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  ga = GeneticOptimizer(config, param_ranges, backtest_fn){Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  results = ga.run(){Style.RESET_ALL}")
+        if choice in ("1", "2") and not self.strategy_name:
+            print(f"  {Fore.RED}Select a strategy first (option 4)."
+                  f"{Style.RESET_ALL}")
+            return
 
-        elif choice == "2":
-            print(f"\n  {Fore.YELLOW}Walk-Forward Analysis{Style.RESET_ALL}")
-            print(f"  {Fore.WHITE}Validates strategy robustness via sliding windows.{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  from backtester import WalkForwardAnalyzer{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  wfa = WalkForwardAnalyzer(in_sample_bars=500, out_of_sample_bars=200){Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  result = wfa.run(backtest_fn, param_combos, data_df){Style.RESET_ALL}")
+        try:
+            if choice == "1":
+                self._run_genetic_search(validation)
+            elif choice == "2":
+                self._run_walk_forward(validation)
+            elif choice == "3":
+                self._run_monte_carlo(validation)
+        except ValueError as exc:
+            print(f"  {Fore.RED}{exc}{Style.RESET_ALL}")
+        except KeyboardInterrupt:
+            print(f"\n  {Fore.YELLOW}Cancelled.{Style.RESET_ALL}")
+        except Exception as exc:
+            self.logger.error("Validation run failed: %s", exc, exc_info=True)
+            print(f"  {Fore.RED}Run failed: {exc}{Style.RESET_ALL}")
 
-        elif choice == "3":
-            print(f"\n  {Fore.YELLOW}Monte Carlo Simulation{Style.RESET_ALL}")
-            print(f"  {Fore.WHITE}Shuffles trade order 1000x to test equity curve.{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  from backtester import MonteCarloSimulator{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  mc = MonteCarloSimulator(num_simulations=1000){Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  result = mc.run(trades, initial_balance=10000){Style.RESET_ALL}")
+    def _run_genetic_search(self, validation) -> None:
+        """Evolve parameters for the selected strategy and print the best."""
+        print(f"\n  {Fore.YELLOW}Genetic search — {self.strategy_name} on "
+              f"{self.symbol} {self.timeframe_key}{Style.RESET_ALL}")
+        date_from, date_to = self._ask_date_range()
+        population = self._ask_int("Population size", 30)
+        generations = self._ask_int("Generations", 15)
+
+        print(f"  {Fore.CYAN}Running {population * generations} backtests …"
+              f"{Style.RESET_ALL}")
+
+        def _progress(pct: float, best: float, gen: int) -> None:
+            print(f"    gen {gen:>3}  best={best:.3f}  ({pct:.0f}%)")
+
+        out = validation.run_genetic(
+            self.strategy_name, self.symbol, self.timeframe_key,
+            date_from, date_to,
+            config=self.config, connector=self.connector,
+            population_size=population, generations=generations,
+            callback=_progress,
+        )
+
+        print(f"\n  {Fore.CYAN}Searched {out['evaluations']} of "
+              f"{out['search_space']} possible combinations "
+              f"({out['bars']} bars).{Style.RESET_ALL}")
+        if not out["results"]:
+            print(f"  {Fore.YELLOW}No profitable parameters found."
+                  f"{Style.RESET_ALL}")
+            return
+        print(f"  {Fore.CYAN}{'#':<4} {'profit factor':<15} params"
+              f"{Style.RESET_ALL}")
+        for idx, row in enumerate(out["results"][:10], 1):
+            metric = row.get(out["target_metric"], 0.0)
+            params = {
+                k: v for k, v in row.items()
+                if k not in ("total_trades", "wins", "losses", "win_rate",
+                             "total_pnl_pips", "total_pnl_money",
+                             "profit_factor", "max_drawdown_pct",
+                             "sharpe_ratio", "avg_win_pips", "avg_loss_pips")
+            }
+            print(f"  {Fore.WHITE}{idx:<4} {metric:<15.3f} {params}"
+                  f"{Style.RESET_ALL}")
+
+    def _run_walk_forward(self, validation) -> None:
+        """Validate the selected strategy on out-of-sample windows."""
+        print(f"\n  {Fore.YELLOW}Walk-forward — {self.strategy_name} on "
+              f"{self.symbol} {self.timeframe_key}{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}Optimises on each window, then scores the "
+              f"window after it.{Style.RESET_ALL}")
+        date_from, date_to = self._ask_date_range(default_days=365)
+        in_sample = self._ask_int("In-sample bars", 500)
+        out_sample = self._ask_int("Out-of-sample bars", 200)
+
+        print(f"  {Fore.CYAN}Running …{Style.RESET_ALL}")
+        result = validation.run_walk_forward(
+            self.strategy_name, self.symbol, self.timeframe_key,
+            date_from, date_to,
+            config=self.config, connector=self.connector,
+            in_sample_bars=in_sample, out_of_sample_bars=out_sample,
+            step_bars=out_sample,
+        )
+
+        if not result.windows:
+            print(f"  {Fore.YELLOW}No complete windows in that range."
+                  f"{Style.RESET_ALL}")
+            return
+
+        print(f"\n  {Fore.CYAN}{len(result.windows)} windows"
+              f"{Style.RESET_ALL}")
+        print(f"  In-sample avg      : {result.avg_in_sample_metric:.3f}")
+        print(f"  Out-of-sample avg  : {result.avg_out_of_sample_metric:.3f}")
+        colour = Fore.GREEN if result.is_robust else Fore.RED
+        print(f"  Robustness ratio   : {colour}{result.robustness_ratio:.3f}"
+              f"{Style.RESET_ALL}")
+        print(f"  OOS trades / P&L   : {result.total_out_of_sample_trades} / "
+              f"{result.overall_out_of_sample_pnl:+.2f}")
+        verdict = (
+            f"{Fore.GREEN}ROBUST — performance largely survived out of sample"
+            if result.is_robust else
+            f"{Fore.RED}FRAGILE — in-sample performance did not carry over; "
+            f"likely curve-fitted"
+        )
+        print(f"  Verdict            : {verdict}{Style.RESET_ALL}")
+
+    def _run_monte_carlo(self, validation) -> None:
+        """Reshuffle a stored backtest's trades to size the luck component."""
+        from backtester import BacktestDB
+
+        db = BacktestDB()
+        history = db.get_history(limit=15)
+        if not history:
+            print(f"  {Fore.YELLOW}No stored backtest runs. Run a backtest "
+                  f"first (the dashboard's Backtest tab).{Style.RESET_ALL}")
+            return
+
+        print(f"\n  {Fore.CYAN}{'#':<4} {'strategy':<12} {'symbol':<10} "
+              f"{'trades':<8} run id{Style.RESET_ALL}")
+        for idx, run in enumerate(history, 1):
+            print(f"  {Fore.WHITE}{idx:<4} "
+                  f"{run.get('strategy_name', '?'):<12} "
+                  f"{run.get('symbol', '?'):<10} "
+                  f"{run.get('total_trades', 0):<8} "
+                  f"{run.get('run_id', '')[:8]}{Style.RESET_ALL}")
+
+        pick = self._ask_int("Run #", 1)
+        if not 1 <= pick <= len(history):
+            print(f"  {Fore.RED}Invalid selection.{Style.RESET_ALL}")
+            return
+        run = history[pick - 1]
+        trades = db.get_trades(run["run_id"])
+        sims = self._ask_int("Simulations", 1000)
+
+        print(f"  {Fore.CYAN}Reshuffling {len(trades)} trades {sims}× …"
+              f"{Style.RESET_ALL}")
+        result = validation.run_monte_carlo(
+            trades,
+            initial_balance=run.get("initial_balance", 10_000.0),
+            num_simulations=sims,
+        )
+
+        print(f"\n  {Fore.CYAN}Monte Carlo — {result.num_simulations} "
+              f"simulations{Style.RESET_ALL}")
+        print(f"  Median return        : {result.median_return:+.2f}")
+        print(f"  5th percentile       : {result.percentile_5_return:+.2f}")
+        print(f"  95th percentile      : {result.percentile_95_return:+.2f}")
+        print(f"  Worst case           : {result.worst_case_return:+.2f}")
+        print(f"  Median max drawdown  : {result.median_max_drawdown:.2f}")
+        print(f"  Worst max drawdown   : {result.worst_case_max_drawdown:.2f}")
+        prob = result.probability_of_profit
+        colour = Fore.GREEN if prob >= 70 else (
+            Fore.YELLOW if prob >= 50 else Fore.RED
+        )
+        print(f"  Probability of profit: {colour}{prob:.1f}%{Style.RESET_ALL}")
+        print(f"\n  {Fore.WHITE}Size risk from the 5th percentile, not the "
+              f"median — the historical curve is one sample."
+              f"{Style.RESET_ALL}")
 
     # ===================================================================
     #  15. RISK DASHBOARD

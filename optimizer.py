@@ -34,10 +34,8 @@ from backtester import BacktestDB, BacktestTrade
 from backtest_core import (
     calc_pnl_pips as _backtest_calc_pnl_pips,
     check_sl_tp as _backtest_check_sl_tp,
-    pip_value_per_lot as _pip_value_per_lot,
-)
-from cloud.worker.worker_backtest import (
     compute_metrics as _backtest_compute_metrics,
+    pip_value_per_lot as _pip_value_per_lot,
     run_single as _backtest_run_single,
 )
 

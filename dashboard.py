@@ -1525,6 +1525,146 @@ def create_app() -> Flask:
             logger.error("POST /api/optimize/cloud/estimate error: %s", exc)
             return jsonify({"error": str(exc)}), 500
 
+    # ==================================================================
+    #  Robustness validation (genetic search / walk-forward / Monte Carlo)
+    # ==================================================================
+
+    @app.route("/api/validate/genetic", methods=["POST"])
+    def api_validate_genetic():
+        """Evolve strategy parameters instead of enumerating the grid.
+
+        Body: ``{"strategy", "symbol", "timeframe", "date_from",
+        "date_to", "population_size"?, "generations"?, "mode"?,
+        "target_metric"?}``
+
+        Runs synchronously — ``population_size × generations``
+        backtests — so keep the population modest from the UI.
+        """
+        import validation
+
+        try:
+            data = request.get_json(force=True) or {}
+            required = ("strategy", "symbol", "timeframe",
+                        "date_from", "date_to")
+            missing = [k for k in required if not data.get(k)]
+            if missing:
+                return jsonify({
+                    "error": f"Missing required fields: {', '.join(missing)}"
+                }), 400
+
+            out = validation.run_genetic(
+                data["strategy"], data["symbol"], data["timeframe"],
+                data["date_from"], data["date_to"],
+                config=_config, connector=_connector,
+                mode=data.get("mode", "normal"),
+                target_metric=data.get("target_metric", "profit_factor"),
+                population_size=int(data.get("population_size", 30)),
+                generations=int(data.get("generations", 15)),
+                optimize_sltp=bool(data.get("optimize_sltp", False)),
+            )
+            return jsonify(out)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            logger.error("POST /api/validate/genetic error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/validate/walk-forward", methods=["POST"])
+    def api_validate_walk_forward():
+        """Optimise on rolling windows and score the window after each.
+
+        Body: ``{"strategy", "symbol", "timeframe", "date_from",
+        "date_to", "in_sample_bars"?, "out_of_sample_bars"?,
+        "step_bars"?, "mode"?}``
+
+        ``robustness_ratio`` is out-of-sample over in-sample
+        performance: how much of the optimised result survived on data
+        the optimiser never saw.
+        """
+        import validation
+
+        try:
+            data = request.get_json(force=True) or {}
+            required = ("strategy", "symbol", "timeframe",
+                        "date_from", "date_to")
+            missing = [k for k in required if not data.get(k)]
+            if missing:
+                return jsonify({
+                    "error": f"Missing required fields: {', '.join(missing)}"
+                }), 400
+
+            out_of_sample = int(data.get("out_of_sample_bars", 200))
+            result = validation.run_walk_forward(
+                data["strategy"], data["symbol"], data["timeframe"],
+                data["date_from"], data["date_to"],
+                config=_config, connector=_connector,
+                mode=data.get("mode", "quick"),
+                in_sample_bars=int(data.get("in_sample_bars", 500)),
+                out_of_sample_bars=out_of_sample,
+                step_bars=int(data.get("step_bars", out_of_sample)),
+                optimize_sltp=bool(data.get("optimize_sltp", False)),
+            )
+            return jsonify({
+                "windows": result.windows,
+                "avg_in_sample_metric": result.avg_in_sample_metric,
+                "avg_out_of_sample_metric": result.avg_out_of_sample_metric,
+                "robustness_ratio": result.robustness_ratio,
+                "total_out_of_sample_trades": result.total_out_of_sample_trades,
+                "overall_out_of_sample_pnl": result.overall_out_of_sample_pnl,
+                "is_robust": result.is_robust,
+            })
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            logger.error("POST /api/validate/walk-forward error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/validate/monte-carlo/<run_id>", methods=["POST"])
+    def api_validate_monte_carlo(run_id: str):
+        """Reshuffle a stored backtest's trades to size the luck component.
+
+        Body: ``{"num_simulations"?, "confidence_level"?}``.  The same
+        trades in a different order give a different drawdown, so the
+        5th-percentile outcome is a more honest risk figure than the one
+        historical path.
+        """
+        import validation
+
+        try:
+            engine = _get_backtest_engine()
+            run = engine.db.get_run(run_id)
+            if run is None:
+                return jsonify({"error": f"Run {run_id} not found."}), 404
+
+            trades = engine.db.get_trades(run_id)
+            data = request.get_json(silent=True) or {}
+            result = validation.run_monte_carlo(
+                trades,
+                initial_balance=run.get("initial_balance", 10_000.0),
+                num_simulations=int(data.get("num_simulations", 1000)),
+                confidence_level=float(data.get("confidence_level", 0.95)),
+            )
+            return jsonify({
+                "run_id": run_id,
+                "num_simulations": result.num_simulations,
+                "confidence_level": result.confidence_level,
+                "median_return": result.median_return,
+                "mean_return": result.mean_return,
+                "worst_case_return": result.worst_case_return,
+                "best_case_return": result.best_case_return,
+                "percentile_5_return": result.percentile_5_return,
+                "percentile_95_return": result.percentile_95_return,
+                "median_max_drawdown": result.median_max_drawdown,
+                "worst_case_max_drawdown": result.worst_case_max_drawdown,
+                "probability_of_profit": result.probability_of_profit,
+            })
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            logger.error("POST /api/validate/monte-carlo/%s error: %s",
+                         run_id, exc)
+            return jsonify({"error": str(exc)}), 500
+
     @app.route("/api/optimize/grids", methods=["GET"])
     def api_optimize_grids():
         """Return the parameter grid info (combo counts per strategy/mode)."""

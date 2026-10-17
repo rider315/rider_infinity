@@ -35,7 +35,8 @@ class ClaudeNewsAnalyzer:
     api_key : str
         Anthropic API key.
     model : str
-        Model identifier (default: ``claude-sonnet-4-20250514``).
+        Model identifier.  Empty (the default) auto-selects from
+        :attr:`_PREFERRED_MODELS` based on what the key can reach.
     max_retries : int
         Maximum number of retry attempts on transient API errors.
     """
@@ -100,9 +101,22 @@ class ClaudeNewsAnalyzer:
     _VALID_ACTIONS = {"BUY", "SELL", "HOLD", "WATCH"}
     _VALID_HORIZONS = {"Minutes", "Hours", "Days"}
 
-    # ── Cost per token (Claude Sonnet pricing) ───────────────────────────
-    _INPUT_COST_PER_TOKEN: float = 3.0 / 1_000_000
-    _OUTPUT_COST_PER_TOKEN: float = 15.0 / 1_000_000
+    # ── Pricing, $ per million tokens (as of 2026-10) ────────────────────
+    # Keyed by model-ID prefix, longest match first.  Previously a single
+    # hard-coded $3/$15 pair — Sonnet 4.6's rate — which over-reported the
+    # cost of every call on the current models by 50%.
+    _PRICING_PER_MTOK: Dict[str, tuple] = {
+        "claude-haiku-5-5": (0.10, 0.50),
+        "claude-sonnet-5-5": (2.00, 10.00),
+        "claude-sonnet-5": (2.00, 10.00),
+        "claude-opus-5-5": (4.00, 20.00),
+        "claude-opus-5": (5.00, 25.00),
+        "claude-haiku-4-5": (1.00, 5.00),
+        "claude-sonnet-4-6": (3.00, 15.00),
+    }
+    #: Used when the model is not in the table above, so an unknown or
+    #: newer model reports *some* cost rather than zero.
+    _FALLBACK_PRICING_PER_MTOK: tuple = (3.00, 15.00)
 
     # ------------------------------------------------------------------ #
     #  Construction                                                       #
@@ -130,36 +144,57 @@ class ClaudeNewsAnalyzer:
             self.model, self.max_retries,
         )
 
+    #: Models to use, most preferred first.  Sonnet is the default tier
+    #: because this is bulk headline classification — high call volume,
+    #: short structured output — where Sonnet's cost/quality is the right
+    #: trade and Opus would be several times the price for no gain.
+    #: Override by passing ``model=`` explicitly.
+    _PREFERRED_MODELS: tuple = (
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-sonnet-5",
+    )
+
     def _detect_model(self) -> str:
-        """Auto-detect the best available Claude model for the API key."""
-        # Preferred models in priority order (sonnet = best cost/quality)
-        preferred = [
-            "claude-sonnet-4-6",
-            "claude-sonnet-4-5-20250929",
-            "claude-haiku-4-5-20251001",
-        ]
+        """Pick the best model this API key can actually reach.
+
+        Walks :attr:`_PREFERRED_MODELS` in order and returns the first one
+        the account has access to.  If none of them are available — an
+        older account, or a newer catalogue — it returns the first
+        preference anyway and lets the API report the real error on the
+        first call.
+
+        .. note::
+           The previous version fell back to "any model whose ID contains
+           'sonnet', taking ``sorted(ids)[0]``".  Sorting IDs
+           alphabetically is not sorting by recency: ``claude-3-5-sonnet``
+           sorts before ``claude-sonnet-5-5``, so the fallback
+           systematically picked the *oldest* available Sonnet. Its
+           preference list was also stale (Sonnet 4.6 era), so on a
+           current account the list missed and that fallback is what
+           actually chose the model.
+        """
         try:
-            available = self.client.models.list()
-            available_ids = {m.id for m in available.data}
-            logger.info("Available Claude models: %s", sorted(available_ids))
-            # Pick the first preferred model that's available
-            for p in preferred:
-                if p in available_ids:
-                    logger.info("Auto-selected model: %s", p)
-                    return p
-            # If none preferred found, pick any sonnet, then any model
-            for mid in sorted(available_ids):
-                if "sonnet" in mid:
-                    logger.info("Auto-selected model (sonnet fallback): %s", mid)
-                    return mid
-            # Last resort — use whatever is available
-            if available_ids:
-                chosen = sorted(available_ids)[0]
-                logger.info("Auto-selected model (any fallback): %s", chosen)
-                return chosen
+            available_ids = {m.id for m in self.client.models.list().data}
         except Exception as exc:
-            logger.warning("Could not list models: %s — using default.", exc)
-        return "claude-sonnet-4-6"
+            logger.warning(
+                "Could not list models (%s) — using %s.",
+                exc, self._PREFERRED_MODELS[0],
+            )
+            return self._PREFERRED_MODELS[0]
+
+        logger.debug("Models available to this key: %s", sorted(available_ids))
+        for candidate in self._PREFERRED_MODELS:
+            if candidate in available_ids:
+                logger.info("Auto-selected model: %s", candidate)
+                return candidate
+
+        logger.warning(
+            "None of the preferred models %s are available to this key. "
+            "Falling back to %s; pass model= explicitly to choose another.",
+            list(self._PREFERRED_MODELS), self._PREFERRED_MODELS[0],
+        )
+        return self._PREFERRED_MODELS[0]
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
@@ -268,18 +303,35 @@ class ClaudeNewsAnalyzer:
         -------
         dict
             Keys: ``total_calls``, ``total_input_tokens``,
-            ``total_output_tokens``, ``estimated_cost_usd``.
+            ``total_output_tokens``, ``model``, ``estimated_cost_usd``.
         """
+        in_rate, out_rate = self._rates_per_mtok()
         cost = (
-            self.total_input_tokens * self._INPUT_COST_PER_TOKEN
-            + self.total_output_tokens * self._OUTPUT_COST_PER_TOKEN
+            self.total_input_tokens * in_rate / 1_000_000
+            + self.total_output_tokens * out_rate / 1_000_000
         )
         return {
             "total_calls": self.total_calls,
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
+            "model": self.model,
             "estimated_cost_usd": round(cost, 6),
         }
+
+    def _rates_per_mtok(self) -> tuple:
+        """Return ``(input, output)`` $ per million tokens for this model.
+
+        Matched on the longest ID prefix so a dated snapshot
+        (``claude-sonnet-5-5-20260401``) prices like its base model.
+        """
+        for prefix in sorted(self._PRICING_PER_MTOK, key=len, reverse=True):
+            if self.model.startswith(prefix):
+                return self._PRICING_PER_MTOK[prefix]
+        logger.debug(
+            "No pricing entry for %s — estimating at $%.2f/$%.2f per MTok.",
+            self.model, *self._FALLBACK_PRICING_PER_MTOK,
+        )
+        return self._FALLBACK_PRICING_PER_MTOK
 
     # ------------------------------------------------------------------ #
     #  Prompt builders                                                    #
@@ -377,7 +429,24 @@ class ClaudeNewsAnalyzer:
                 response = self.client.messages.create(
                     model=self.model,
                     max_tokens=1024,
-                    system=self.SYSTEM_PROMPT,
+                    system=[{
+                        "type": "text",
+                        "text": self.SYSTEM_PROMPT,
+                        # Correct placement for a cache breakpoint: the
+                        # system prompt is the only stable prefix (the
+                        # article text is volatile and comes after it).
+                        # At ~400 tokens it is currently *below* the
+                        # 512-token minimum cacheable prefix, so this is
+                        # a no-op today — it starts paying off by itself
+                        # if the guidelines above grow past that.
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                    # Classifying a headline into a fixed JSON schema does
+                    # not need deep reasoning, and this runs on every
+                    # article that comes in. The current models default to
+                    # high effort, which would bill far more thinking than
+                    # this task can use.
+                    output_config={"effort": "low"},
                     messages=[{"role": "user", "content": user_message}],
                 )
 
@@ -387,11 +456,37 @@ class ClaudeNewsAnalyzer:
                     self.total_input_tokens += response.usage.input_tokens
                     self.total_output_tokens += response.usage.output_tokens
 
-                # Extract text from the first content block
-                if response.content:
-                    return response.content[0].text
+                # A safety classifier can decline a request: that arrives
+                # as a normal HTTP 200 with stop_reason "refusal" and no
+                # text block, so it has to be checked before the content
+                # is read.
+                if response.stop_reason == "refusal":
+                    details = getattr(response, "stop_details", None)
+                    logger.warning(
+                        "Claude declined to analyse this article "
+                        "(category=%s). Returning neutral.",
+                        getattr(details, "category", None),
+                    )
+                    return None
 
-                logger.warning("Claude returned empty content (attempt %d).", attempt)
+                # Pick the text block rather than content[0]. Thinking is
+                # on by default on the current models, so the first block
+                # is often a thinking block, which has no .text at all —
+                # reading content[0].text raised AttributeError.
+                text = next(
+                    (
+                        block.text for block in response.content
+                        if getattr(block, "type", None) == "text"
+                    ),
+                    None,
+                )
+                if text:
+                    return text
+
+                logger.warning(
+                    "Claude returned no text block (attempt %d, "
+                    "stop_reason=%s).", attempt, response.stop_reason,
+                )
 
             except anthropic.RateLimitError as exc:
                 last_error = exc
