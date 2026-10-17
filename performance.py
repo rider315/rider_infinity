@@ -18,6 +18,7 @@ import csv
 import io
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from utils import utc_now
 
 # Column order for the exported CSV (stable, analysis-friendly).
 CSV_COLUMNS = [
@@ -253,7 +254,7 @@ def build_summary(
             slabs.setdefault(label, []).append(t)
 
     return {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": utc_now().isoformat() + "Z",
         "filters": {
             "bot_id": bot_id, "start": start, "end": end, "slab": slab,
         },

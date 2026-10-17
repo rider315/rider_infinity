@@ -29,8 +29,13 @@ def serialize_job_data(
     point: float,
     digits: int,
     pip_value_per_lot: float,
+    spread_pips: float = 0.0,
 ) -> tuple[bytes, bytes]:
     """Serialize DataFrame and metadata for upload to S3.
+
+    ``spread_pips`` travels with the job so a cloud worker charges the
+    same cost the local engine does. Without it the fleet ranked every
+    parameter set on gross P&L.
 
     Returns (parquet_bytes, meta_json_bytes).
     """
@@ -43,6 +48,7 @@ def serialize_job_data(
         "point": point,
         "digits": digits,
         "pip_value_per_lot": pip_value_per_lot,
+        "spread_pips": spread_pips,
     }
     meta_bytes = json.dumps(meta).encode()
 
@@ -89,7 +95,13 @@ def create_worker_package() -> bytes:
     Includes:
       - cloud/ package (worker code)
       - strategies/ package (all strategies)
-      - utils.py (pip helpers)
+      - instruments.py (symbol families + pip arithmetic)
+      - backtest_core.py (the shared simulation kernel)
+      - utils.py (logging / ATR helpers)
+
+    ``instruments.py`` and ``backtest_core.py`` are what make the worker
+    agree with the local engine. The worker used to carry its own
+    hard-coded pip arithmetic, which was wrong by 1000x on gold.
     """
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -110,10 +122,12 @@ def create_worker_package() -> bytes:
         if cloud_init.exists():
             tar.add(str(cloud_init), arcname="cloud/__init__.py")
 
-        # Add utils.py
-        utils_file = _PROJECT_ROOT / "utils.py"
-        if utils_file.exists():
-            tar.add(str(utils_file), arcname="utils.py")
+        # Add the root-level modules the worker imports.
+        for module in ("instruments.py", "backtest_core.py", "utils.py",
+                       "session_manager.py", "evaluation_matrix.py"):
+            module_file = _PROJECT_ROOT / module
+            if module_file.exists():
+                tar.add(str(module_file), arcname=module)
 
     package_bytes = buf.getvalue()
     logger.info("Created worker package: %d KB", len(package_bytes) // 1024)

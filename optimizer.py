@@ -26,13 +26,15 @@ import pandas as pd
 from config import Config, TIMEFRAME_MAP
 from strategies import get_strategy
 from strategies.base import SignalAction
-from utils import pips_to_price, price_to_pips, setup_logger
-from backtester import BacktestDB, BacktestTrade
-from cloud.worker.worker_backtest import (
+from utils import setup_logger
+from backtester import BacktestDB
+# The simulation kernel lives in backtest_core (pure, no MT5, no cloud
+# dependency). The sweep previously imported it from cloud.worker, so the
+# local optimiser could not run without the cloud package installed.
+from backtest_core import (
+    pip_value_per_lot as _pip_value_per_lot,
     run_single as _backtest_run_single,
-    compute_metrics as _backtest_compute_metrics,
-    check_sl_tp as _backtest_check_sl_tp,
-    calc_pnl_pips as _backtest_calc_pnl_pips,
+    spread_pips_from_symbol as _spread_pips_from_symbol,
 )
 
 logger = setup_logger("optimizer")
@@ -56,6 +58,15 @@ PARAM_GRIDS: dict[str, dict[str, dict[str, list]]] = {
             "quick":  [21, 30, 50, 100],
             "normal": [15, 21, 30, 40, 50, 75, 100],
             "deep":   list(range(10, 120, 5)),
+        },
+        # The single highest-impact setting on this strategy, and it was
+        # missing: the grid only searched the two periods, so no sweep —
+        # however deep — could discover that the trend filter is what
+        # makes a raw crossover tradeable. See EMACrossoverStrategy.
+        "use_trend_filter": {
+            "quick":  [True],
+            "normal": [True, False],
+            "deep":   [True, False],
         },
     },
     "rsi": {
@@ -632,9 +643,27 @@ class StrategyOptimizer:
             raise ValueError(f"Cannot get symbol info for {result.symbol}")
         point = sym_info.point
         digits = sym_info.digits
-        pip_value_per_lot = 10.0
-        if "JPY" in result.symbol.upper():
-            pip_value_per_lot = 1000.0 * point * 100
+        # One shared pip definition — this used to special-case JPY with
+        # its own formula, which disagreed with the live engine.
+        pip_value_per_lot = _pip_value_per_lot(
+            result.symbol, point,
+            contract_size=float(
+                getattr(sym_info, "trade_contract_size", 0) or 0
+            ),
+            tick_value=getattr(sym_info, "trade_tick_value", 0) or 0,
+            tick_size=getattr(sym_info, "trade_tick_size", 0) or 0,
+        )
+        # Charge the spread, as BacktestEngine does. Without it the sweep
+        # ranks every parameter set on gross P&L and favours whichever
+        # trades most often.
+        spread_pips = _spread_pips_from_symbol(
+            getattr(sym_info, "spread", 0), result.symbol, point,
+            max_spread_points=getattr(self.config, "max_spread_points", 30),
+        )
+        logger.info(
+            "Sweep units for %s: $/pip/lot=%.2f spread=%.2f pips.",
+            result.symbol, pip_value_per_lot, spread_pips,
+        )
 
         # ── 3. Generate parameter combinations ───────────────────────
         combos = self._generate_combos(
@@ -670,6 +699,7 @@ class StrategyOptimizer:
                     initial_balance=result.initial_balance,
                     default_sl=params.get("sl_pips", self.config.default_sl_pips),
                     default_tp=params.get("tp_pips", self.config.default_tp_pips),
+                    spread_pips=spread_pips,
                     max_open_trades=result.max_open_trades,
                 )
                 # Filter combos with too few trades
@@ -737,6 +767,7 @@ class StrategyOptimizer:
         default_sl: float,
         default_tp: float,
         max_open_trades: int = 5,
+        spread_pips: float = 0.0,
     ) -> dict:
         return _backtest_run_single(
             strategy_name=strategy_name, params=params, df=df,
@@ -744,6 +775,7 @@ class StrategyOptimizer:
             pip_value_per_lot=pip_value_per_lot, lot_size=lot_size,
             initial_balance=initial_balance, default_sl=default_sl,
             default_tp=default_tp, max_open_trades=max_open_trades,
+            spread_pips=spread_pips,
         )
 
 
@@ -907,15 +939,37 @@ class GeneticOptimizer:
 
             population = new_pop
 
-        # Final evaluation
+        # Final evaluation.
+        #
+        # ``best_ever`` is included explicitly. Selection, crossover and
+        # mutation are all stochastic, so the best individual found in an
+        # early generation need not survive into the last one — and this
+        # scored only the final population, so the run could report a
+        # worse result than it had actually found. That is the entire
+        # reason the loop above tracks ``best_ever``, and it was
+        # previously computed and then thrown away.
+        candidates = list(population)
+        if best_ever is not None and best_ever not in candidates:
+            candidates.append(best_ever)
+
         results = []
-        for individual in population:
+        seen: set = set()
+        for individual in candidates:
+            # The population converges, so the same genome recurs many
+            # times; each backtest is expensive enough to be worth
+            # de-duplicating.
+            key = tuple(sorted(individual.items()))
+            if key in seen:
+                continue
+            seen.add(key)
             try:
                 result = self.backtest_fn(individual)
                 result["params"] = individual
                 results.append(result)
             except Exception:
-                pass
+                self._logger.debug(
+                    "Final evaluation failed for %s", individual,
+                )
 
         results.sort(key=lambda r: r.get(self.target_metric, 0), reverse=True)
         return results[:20]

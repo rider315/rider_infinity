@@ -8,7 +8,6 @@ timeframe options used throughout the bot.
 """
 
 import os
-import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -62,12 +61,25 @@ SYMBOL_GROUPS: dict[str, list[str]] = {
 }
 
 
+# ── Errors ───────────────────────────────────────────────────────────────
+class ConfigError(RuntimeError):
+    """A mandatory setting is missing or malformed.
+
+    Raised instead of calling ``sys.exit`` so that importing this module
+    can never terminate the host process.  ``config.py`` is a library:
+    killing the interpreter from inside it meant the WSGI entry point had
+    to monkey-patch ``sys.exit`` to stay alive, which in turn let the app
+    serve traffic with a dead broker connection.  Entry points catch this
+    and decide for themselves whether to exit.
+    """
+
+
 # ── Config class ─────────────────────────────────────────────────────────
 class Config:
     """Strongly-typed access to every setting the bot needs.
 
     Reads from environment variables (populated by `.env`) and applies
-    sensible defaults where appropriate.  Raises ``SystemExit`` if
+    sensible defaults where appropriate.  Raises :class:`ConfigError` if
     mandatory MT5 credentials are missing so the bot fails fast.
     """
 
@@ -203,6 +215,17 @@ class Config:
         self.magic_number: int = int(os.getenv("MAGIC_NUMBER", "123456"))
         self.dry_run: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 
+        # Adopt positions on a bot's symbol that carry no RI magic number —
+        # i.e. trades opened by hand in the MT5 terminal. Default OFF: an
+        # adopted position inherits the bot's time-stop, breakeven and Quick
+        # Exit, so leaving this on means a manual trade can be closed out
+        # from under you. Turn it on only if you want the bot to take over
+        # manual trades on its symbol.
+        self.adopt_untagged_positions: bool = (
+            os.getenv("ADOPT_UNTAGGED_POSITIONS", "false").lower()
+            in ("true", "1", "yes")
+        )
+
         # --- News Intelligence -------------------------------------------
         self.claude_api_key: str = os.getenv("CLAUDE_API_KEY", "")
         self.news_api_key: str = os.getenv("NEWS_API_KEY", "")
@@ -270,25 +293,38 @@ class Config:
 
     @staticmethod
     def _require(var: str) -> str:
-        """Return an env-var's value or exit with an error message."""
+        """Return an env-var's value.
+
+        Raises
+        ------
+        ConfigError
+            The variable is unset, empty, or still holds a ``your_…``
+            placeholder from ``.env.example``.
+        """
         value = os.getenv(var)
         if not value or value.startswith("your_"):
-            print(
-                f"[CONFIG ERROR] '{var}' is missing or still set to a "
-                f"placeholder.  Please update your .env file."
+            raise ConfigError(
+                f"'{var}' is missing or still set to a placeholder. "
+                f"Please update your .env file."
             )
-            sys.exit(1)
         return value
 
     @staticmethod
     def _require_int(var: str) -> int:
-        """Like ``_require`` but also casts to ``int``."""
+        """Like ``_require`` but also casts to ``int``.
+
+        Raises
+        ------
+        ConfigError
+            The variable is missing, or is not a whole number.
+        """
         raw = Config._require(var)
         try:
             return int(raw)
         except ValueError:
-            print(f"[CONFIG ERROR] '{var}' must be an integer, got '{raw}'.")
-            sys.exit(1)
+            raise ConfigError(
+                f"'{var}' must be an integer, got '{raw}'."
+            ) from None
 
     # -- Representation ----------------------------------------------------
 

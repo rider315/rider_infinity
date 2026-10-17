@@ -12,14 +12,16 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import MetaTrader5 as mt5
 
 from config import Config
-from session_manager import is_crypto
+from instruments import is_crypto, pip_value_per_lot
+from session_manager import SessionManager
+from utils import utc_now
 
 # File where risk state is persisted across restarts
 _STATE_FILE = Path(__file__).resolve().parent / "data" / "risk_state.json"
@@ -59,7 +61,9 @@ class RiskManager:
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
-    def __init__(self, config: Config, connector) -> None:
+    def __init__(
+        self, config: Config, connector, session_mgr: SessionManager | None = None,
+    ) -> None:
         """
         Parameters
         ----------
@@ -67,9 +71,14 @@ class RiskManager:
             Application configuration instance.
         connector : MT5Connector
             Live connection wrapper — used to pull account and symbol data.
+        session_mgr : SessionManager, optional
+            Owner of the forex calendar, consulted by :meth:`can_trade`.
+            A fresh one is created when not supplied; pass the
+            application's instance to keep a single source of truth.
         """
         self.config = config
         self.connector = connector
+        self.session_mgr = session_mgr or SessionManager()
         self.logger = logging.getLogger("RiskManager")
 
         # Daily tracking — call reset_daily_tracking() at the start of
@@ -184,36 +193,36 @@ class RiskManager:
         volume_step = sym_info.volume_step
 
         # --- Pip value ------------------------------------------------------
-        # A "pip" is usually 10 points for 5-digit brokers (e.g. EURUSD),
-        # and 1 point for JPY pairs / metals.  We derive the pip value from
-        # the tick value supplied by the broker.
-        if tick_size == 0 or point == 0:
+        if point == 0:
             self.logger.warning(
-                "tick_size or point is 0 for %s — falling back to volume_min.",
-                symbol,
+                "point is 0 for %s — falling back to volume_min.", symbol,
             )
             return volume_min
 
-        # Determine the pip-to-point multiplier
-        digits = sym_info.digits
-        if digits in (3, 5):
-            pip_points = 10  # 5-digit broker: 1 pip = 10 points
-        else:
-            pip_points = 1   # 4-digit / 2-digit
+        # Monetary value of a 1-pip move on 1 standard lot. The pip size
+        # itself comes from instruments.pip_size, the one definition the
+        # whole code-base shares: this function used to apply its own
+        # digits rule while order_manager placed the stop with another, so
+        # a trade was sized for a different risk than it actually carried.
+        pip_val = pip_value_per_lot(
+            symbol, point,
+            contract_size=float(
+                getattr(sym_info, "trade_contract_size", 0) or 0
+            ),
+            tick_value=tick_value,
+            tick_size=tick_size,
+        )
 
-        # Value of 1 pip movement for 1 standard lot
-        pip_value_per_lot = tick_value * (pip_points * point) / tick_size
-
-        if pip_value_per_lot <= 0 or sl_pips <= 0:
+        if pip_val <= 0 or sl_pips <= 0:
             self.logger.warning(
                 "pip_value_per_lot=%.5f  sl_pips=%.1f — using volume_min.",
-                pip_value_per_lot,
+                pip_val,
                 sl_pips,
             )
             return volume_min
 
         # --- Raw lot size ---------------------------------------------------
-        lot_size = risk_amount / (sl_pips * pip_value_per_lot)
+        lot_size = risk_amount / (sl_pips * pip_val)
 
         # --- Round to volume step -------------------------------------------
         if volume_step > 0:
@@ -231,7 +240,7 @@ class RiskManager:
             self.config.max_risk_per_trade,
             risk_amount,
             sl_pips,
-            pip_value_per_lot,
+            pip_val,
             lot_size,
         )
 
@@ -242,13 +251,18 @@ class RiskManager:
         sym_info = mt5.symbol_info(symbol)
         if sym_info is None:
             return 0.0
-        tick_value = sym_info.trade_tick_value
-        tick_size = sym_info.trade_tick_size
         point = sym_info.point
-        if tick_size == 0 or point == 0:
+        if point == 0:
             return 0.0
-        pip_points = 10 if sym_info.digits in (3, 5) else 1
-        return tick_value * (pip_points * point) / tick_size
+        return pip_value_per_lot(
+            symbol, point,
+            contract_size=float(
+                getattr(sym_info, "trade_contract_size", 0) or 0
+            ),
+            tick_value=sym_info.trade_tick_value,
+            tick_size=sym_info.trade_tick_size,
+            fallback=0.0,
+        )
 
     def cap_lot_for_max_loss(
         self, symbol: str, sl_pips: float, lot: float,
@@ -320,16 +334,18 @@ class RiskManager:
             ``(True, "OK")`` when all checks pass, otherwise
             ``(False, "<reason>")`` explaining which check failed.
         """
-        # 1 — Market open? (basic weekend check). Crypto trades 24/7, so the
-        # forex weekend + trading-hours calendar is skipped for crypto symbols.
-        now = datetime.utcnow()
-        if not is_crypto(symbol):
-            weekday = now.weekday()  # 0=Mon … 6=Sun
-            if weekday == 6 or (weekday == 5 and now.hour >= 22):
-                return (False, "Market is closed (weekend).")
-            if weekday == 0 and now.hour < 0:
-                return (False, "Market has not opened yet (Sunday evening).")
+        # 1 — Market open? Delegated to SessionManager, which owns the forex
+        # calendar (weekend closure, crypto 24/7, session windows). This used
+        # to be a second, hand-rolled copy of that calendar here, and it
+        # disagreed with the real one: it treated Saturday before 22:00 UTC as
+        # open, treated the whole of Sunday as closed even after the 22:00
+        # reopen, and carried an unreachable ``weekday == 0 and now.hour < 0``
+        # branch that could never fire.
+        now = datetime.now(timezone.utc)
+        if not self.session_mgr.is_market_open(now=now, symbol=symbol):
+            return (False, "Market is closed (weekend / no active session).")
 
+        if not is_crypto(symbol):
             # 1b — Trading-hours window (UTC). Backtests show off-session hours
             # produce mostly losing/noise trades; this gate restricts entries to
             # the configured window (default 0..24 = no restriction).
@@ -691,7 +707,7 @@ class RiskManager:
             if equity > self._risk_state["peak_equity"]:
                 self._risk_state["peak_equity"] = equity
 
-        self._risk_state["last_update"] = datetime.utcnow().isoformat()
+        self._risk_state["last_update"] = utc_now().isoformat()
         self._save_state()
         return dict(self._risk_state)
 

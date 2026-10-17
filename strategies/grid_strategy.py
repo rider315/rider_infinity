@@ -17,9 +17,15 @@ from __future__ import annotations
 
 import logging
 
+
 import pandas as pd
 
+from instruments import estimate_pip_size
+
+from evaluation_matrix import EvalScore
+
 from .base import BaseStrategy, Signal, SignalAction, TriggerProximity
+
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +115,8 @@ class GridStrategy(BaseStrategy):
             # Below center → BUY
             level_price = center + grid_position * self.grid_size_pips * pip_size
             reason = (
-                f"Grid BUY level {grid_position} triggered at "
-                f"{current_price:.5f} (center={center:.5f})"
+                f"Grid BUY level {grid_position} (@{level_price:.5f}) "
+                f"triggered at {current_price:.5f} (center={center:.5f})"
             )
             logger.info("[%s] %s — %s", self.name, symbol, reason)
             return Signal(
@@ -126,8 +132,8 @@ class GridStrategy(BaseStrategy):
             # Above center → SELL
             level_price = center + grid_position * self.grid_size_pips * pip_size
             reason = (
-                f"Grid SELL level +{grid_position} triggered at "
-                f"{current_price:.5f} (center={center:.5f})"
+                f"Grid SELL level +{grid_position} (@{level_price:.5f}) "
+                f"triggered at {current_price:.5f} (center={center:.5f})"
             )
             logger.info("[%s] %s — %s", self.name, symbol, reason)
             return Signal(
@@ -177,9 +183,8 @@ class GridStrategy(BaseStrategy):
             },
         )
 
-    def evaluate(self, df: pd.DataFrame, symbol: str) -> "EvalScore":
+    def evaluate(self, df: pd.DataFrame, symbol: str) -> EvalScore:
         """Return an evaluation score for the evaluation matrix."""
-        from evaluation_matrix import EvalScore
 
         signal = self.analyze(df, symbol)
 
@@ -206,8 +211,12 @@ class GridStrategy(BaseStrategy):
 
     @staticmethod
     def _estimate_pip_size(symbol: str) -> float:
-        """Estimate pip size from symbol name."""
-        sym = symbol.upper()
-        if "JPY" in sym:
-            return 0.01
-        return 0.0001
+        """Pip size for the grid's level spacing.
+
+        A strategy never sees ``symbol_info()``, so this is an estimate
+        from the symbol's family — see
+        :func:`instruments.estimate_pip_size`. The previous inline
+        version read gold's pip as 0.0001 instead of 0.1, mis-placing
+        every grid level on metals by a factor of 1000.
+        """
+        return estimate_pip_size(symbol)

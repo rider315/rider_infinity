@@ -15,6 +15,10 @@ import datetime as dt
 import MetaTrader5 as mt5
 import pandas as pd
 
+from backtest_core import (
+    pip_value_per_lot as _pip_value_per_lot,
+    profit_factor,
+)
 from config import Config, TIMEFRAME_MAP
 from strategies import get_strategy
 from strategies.base import SignalAction
@@ -24,7 +28,12 @@ cfg = Config()
 
 
 def pip_value_per_lot(symbol: str, point: float) -> float:
-    return 1000.0 * point * 100 if "JPY" in symbol.upper() else 10.0
+    """$ per pip per lot, via the shared instrument definitions.
+
+    Previously computed with its own JPY special case, which disagreed
+    with both the live engine and the backtester.
+    """
+    return _pip_value_per_lot(symbol, point, contract_size=100_000.0)
 
 
 def resolve_sl_tp_new(window, symbol, point):
@@ -132,14 +141,12 @@ def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5,
     # metrics
     n = len(closed)
     wins = [p for p in closed if p > 0]
-    losses = [p for p in closed if p < 0]
-    gp, gl = sum(wins), abs(sum(losses))
-    pf = (gp / gl) if gl > 0 else float("inf")
+    pf = profit_factor(closed)
     return {
         "mode": mode, "trades": n,
         "win_rate": round(len(wins) / n * 100, 1) if n else 0.0,
         "net": round(sum(closed), 2),
-        "pf": round(pf, 2) if pf != float("inf") else "inf",
+        "pf": round(pf, 2),
         "max_dd": round(max_dd, 2),
         "worst": round(min(closed), 2) if closed else 0.0,
         "trade_log": trades,

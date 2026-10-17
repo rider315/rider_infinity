@@ -17,10 +17,9 @@ CLI / non-interactive mode::
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 
 try:
@@ -39,7 +38,7 @@ except ImportError:
 
 import MetaTrader5 as mt5
 
-from config import Config, SYMBOL_GROUPS, TIMEFRAME_OPTIONS, TIMEFRAME_MAP
+from config import Config, ConfigError, SYMBOL_GROUPS, TIMEFRAME_OPTIONS, TIMEFRAME_MAP
 from mt5_connector import MT5Connector
 from market_data import MarketDataFeed
 from order_manager import OrderManager
@@ -47,20 +46,20 @@ from session_manager import SessionManager
 
 from risk_manager import RiskManager
 from multi_bot import MultiBotManager, multi_bot_menu
-from strategies import get_strategy, list_strategies, STRATEGY_REGISTRY
+from strategies import get_strategy, list_strategies
 from strategies.base import SignalAction
-from evaluation_matrix import EvaluationMatrix, EvalScore, EvaluatorState, AggregationMode
+import trade_manager
 from trailing_profiles import get_trailing_profile, TrailingState
 from automation.engine import AutomationEngine
-from profile_manager import ProfileManager, TradingProfile
-from event_bus import EventBus, EventChannel, emit_sync
+from profile_manager import ProfileManager
+from event_bus import EventChannel, emit_sync
 from utils import (
     clear_screen,
     format_account_info,
-    pips_to_price,
     print_banner,
     save_trade_to_journal,
     setup_logger,
+    utc_now,
 )
 
 
@@ -98,6 +97,9 @@ class RiderInfinityBot:
         self.profile_mgr: Optional[ProfileManager] = None
         self.trailing_states: dict = {}  # ticket -> TrailingState
         self.trailing_profile_name: str = "atr"  # default trailing profile
+        # Epoch until which new entries are blocked after a losing
+        # stop-out (see trade_manager.cooldown_block_reason).
+        self.cooldown_until: float = 0.0
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -119,7 +121,9 @@ class RiderInfinityBot:
         self.market_data = MarketDataFeed()
         self.session_mgr = SessionManager()
         self.order_mgr = OrderManager(self.config, dry_run=self.dry_run)
-        self.risk_mgr = RiskManager(self.config, self.connector)
+        self.risk_mgr = RiskManager(
+            self.config, self.connector, session_mgr=self.session_mgr,
+        )
         self.risk_mgr.reset_daily_tracking()
 
         self._show_account_summary()
@@ -621,7 +625,7 @@ class RiderInfinityBot:
         # --- Main loop -----------------------------------------------------
         try:
             while True:
-                now = datetime.utcnow()
+                now = utc_now()
 
                 # -- Market open check (crypto trades 24/7) --
                 if not self.session_mgr.is_market_open(symbol=self.symbol):
@@ -709,7 +713,17 @@ class RiderInfinityBot:
 
                 # -- Act on BUY / SELL signals --
                 if signal.action in (SignalAction.BUY, SignalAction.SELL):
-                    self._execute_signal(signal)
+                    self._execute_signal(signal, df)
+
+                # -- Active trade management (shared with the fleet engine) --
+                # Breakeven stops losers running to the full stop while
+                # winners are banked early; the time-stop cuts positions
+                # that will neither hit SL nor TP; the cooldown blocks
+                # immediate re-entry after a losing stop-out.
+                try:
+                    self._manage_open_positions()
+                except Exception as exc:
+                    self.logger.debug("Trade management error: %s", exc)
 
                 # -- Update trailing stops on open positions --
                 try:
@@ -732,33 +746,30 @@ class RiderInfinityBot:
     # ------------------------------------------------------------------
     # Execute a signal
     # ------------------------------------------------------------------
-    def _execute_signal(self, signal) -> None:
+    def _execute_signal(self, signal, df) -> None:
         """Validate risk, compute prices, and place an order for *signal*."""
         assert self.order_mgr is not None
         assert self.risk_mgr is not None
         assert self.market_data is not None
 
         symbol = signal.symbol or self.symbol
-        sl_pips = signal.sl_pips or self.config.default_sl_pips
-        tp_pips = signal.tp_pips or self.config.default_tp_pips
-
-        # --- Lot size -------------------------------------------------------
-        if self.lot_mode == "auto":
-            lot = self.risk_mgr.calculate_lot_size(symbol, sl_pips)
-        else:
-            lot = self.lot_size
-
-        # --- Risk gate check (enhanced with correlation + recovery) ---------
         direction = "BUY" if signal.action == SignalAction.BUY else "SELL"
-        can, reason = self.risk_mgr.can_trade_enhanced(symbol, lot, direction)
-        if not can:
-            self.logger.info("Trade blocked by risk manager: %s", reason)
-            print(
-                f"  {Fore.YELLOW}Trade blocked: {reason}{Style.RESET_ALL}"
-            )
+
+        # --- Entry gates ----------------------------------------------------
+        # A global pause armed by an automation rule (e.g. Emergency Stop)
+        # or from the dashboard, then the post-loss cooldown: a breakout
+        # signal stays valid for several candles, so without the cooldown
+        # the bot re-enters the move that just stopped it out.
+        block = (
+            trade_manager.GATE.block_reason()
+            or trade_manager.cooldown_block_reason(self.cooldown_until)
+        )
+        if block:
+            self.logger.info("Trade suppressed: %s", block)
+            print(f"  {Fore.YELLOW}Trade blocked: {block}{Style.RESET_ALL}")
             return
 
-        # --- SL / TP prices -------------------------------------------------
+        # --- Symbol metadata (needed before stops can be sized) -------------
         tick = self.market_data.get_tick(symbol)
         if tick is None:
             self.logger.warning("Cannot get tick for %s — skipping signal.", symbol)
@@ -773,16 +784,46 @@ class RiderInfinityBot:
         point = sym_info["point"]
         digits = sym_info["digits"]
 
+        # --- Stops: volatility-aware, clamped, with an RR floor -------------
+        # Shared with the fleet engine so both paths size risk identically.
+        sl_pips, tp_pips = trade_manager.resolve_sl_tp(
+            self.config, signal, df, symbol, point,
+        )
+
+        # --- Lot size -------------------------------------------------------
+        if self.lot_mode == "auto":
+            lot = self.risk_mgr.calculate_lot_size(symbol, sl_pips)
+        else:
+            lot = self.lot_size
+
+        # --- Hard per-trade loss cap ----------------------------------------
+        # Shrinks (or rejects) the lot so one trade cannot lose more than
+        # config.max_loss_per_trade_pct of equity.
+        lot, cap_note = self.risk_mgr.cap_lot_for_max_loss(symbol, sl_pips, lot)
+        if lot <= 0:
+            self.logger.info("Trade blocked by loss cap: %s", cap_note)
+            print(f"  {Fore.YELLOW}Trade blocked: {cap_note}{Style.RESET_ALL}")
+            return
+
+        # --- Risk gate check (enhanced with correlation + recovery) ---------
+        can, reason = self.risk_mgr.can_trade_enhanced(symbol, lot, direction)
+        if not can:
+            self.logger.info("Trade blocked by risk manager: %s", reason)
+            print(
+                f"  {Fore.YELLOW}Trade blocked: {reason}{Style.RESET_ALL}"
+            )
+            return
+
+        # --- SL / TP prices -------------------------------------------------
         if signal.action == SignalAction.BUY:
             order_type = mt5.ORDER_TYPE_BUY
             entry = tick["ask"]
-            sl_price = round(entry - pips_to_price(sl_pips, symbol, point), digits)
-            tp_price = round(entry + pips_to_price(tp_pips, symbol, point), digits)
         else:
             order_type = mt5.ORDER_TYPE_SELL
             entry = tick["bid"]
-            sl_price = round(entry + pips_to_price(sl_pips, symbol, point), digits)
-            tp_price = round(entry - pips_to_price(tp_pips, symbol, point), digits)
+        sl_price, tp_price = trade_manager.stop_and_target_prices(
+            direction, entry, sl_pips, tp_pips, symbol, point, digits,
+        )
 
         comment = f"{self.strategy_name}|{signal.reason[:20] if signal.reason else ''}"
 
@@ -804,7 +845,7 @@ class RiderInfinityBot:
             )
             save_trade_to_journal(
                 {
-                    "time": datetime.utcnow().isoformat(),
+                    "time": utc_now().isoformat(),
                     "symbol": symbol,
                     "action": action_str,
                     "lot": lot,
@@ -883,7 +924,7 @@ class RiderInfinityBot:
             "MN1": 2592000,
         }
         interval = tf_seconds.get(timeframe_key, 300)  # default 5 min
-        now_ts = int(datetime.utcnow().timestamp())
+        now_ts = int(utc_now().timestamp())
         elapsed = now_ts % interval
         remaining = interval - elapsed
         return remaining
@@ -891,6 +932,91 @@ class RiderInfinityBot:
     # ===================================================================
     #  TRAILING STOP MANAGEMENT
     # ===================================================================
+    def _manage_open_positions(self) -> None:
+        """Apply the shared trade-management rules to this bot's positions.
+
+        Runs once per loop iteration:
+
+        * **Breakeven** — pulls a winning trade's stop to entry once it is
+          far enough in profit, so a trade that goes green and reverses
+          exits at ≈scratch instead of a full loss.
+        * **Time-stop** — closes positions held past
+          ``config.max_trade_hours``, which will neither hit SL nor TP and
+          only tie up margin.
+        * **Post-loss cooldown** — when a tracked position has closed, a
+          losing stop-out arms a cooldown that blocks re-entry.
+
+        All three live in :mod:`trade_manager` so this path and the fleet
+        engine enforce the same rules.  Skipped in dry-run, where there is
+        no live position to modify.
+        """
+        if self.dry_run or self.order_mgr is None:
+            return
+
+        raw = mt5.positions_get(symbol=self.symbol)
+        if raw is None:
+            raw = ()
+        magic = self.config.magic_number
+        positions = [
+            trade_manager.position_view(p)
+            for p in raw
+            if getattr(p, "magic", 0) == magic
+        ]
+        open_tickets = {p["ticket"] for p in positions}
+
+        # Detect closes among the tickets we were tracking, and arm the
+        # cooldown if one was a losing stop-out.
+        for ticket in list(self.trailing_states):
+            if ticket not in open_tickets:
+                self._note_closed_position(ticket)
+
+        if not positions:
+            return
+
+        trade_manager.apply_breakeven(
+            self.order_mgr, self.config, positions, self.logger,
+        )
+        trade_manager.apply_time_stop(
+            self.order_mgr, self.config, positions, self.logger,
+        )
+
+    def _note_closed_position(self, ticket: int) -> None:
+        """Arm the post-loss cooldown if *ticket* closed as a losing stop-out.
+
+        Sums the closing deals for the position to get its net profit and
+        reads the exit reason from the deal's ``reason`` code, mirroring
+        ``MultiBotManager._record_closed_trade``.
+        """
+        try:
+            deals = mt5.history_deals_get(position=ticket)
+            if not deals:
+                return
+            profit = 0.0
+            reason_code = None
+            for deal in deals:
+                # DEAL_ENTRY_OUT == 1, OUT_BY == 2 (hedged close)
+                if getattr(deal, "entry", 0) in (1, 2):
+                    profit += deal.profit
+                    reason_code = getattr(deal, "reason", None)
+
+            exit_reason = trade_manager.DEAL_REASON_MAP.get(
+                reason_code, "UNKNOWN",
+            )
+            if trade_manager.should_start_cooldown(
+                self.config, exit_reason, profit,
+            ):
+                self.cooldown_until = trade_manager.cooldown_expiry(self.config)
+                self.logger.info(
+                    "Position #%s stopped out at %.2f — entry cooldown for "
+                    "%.0f min.",
+                    ticket, profit,
+                    float(getattr(self.config, "sl_cooldown_min", 0)),
+                )
+        except Exception as exc:
+            self.logger.debug(
+                "Could not read deal history for #%s: %s", ticket, exc,
+            )
+
     def _update_trailing_stops(
         self, profile, current_price: float, df,
     ) -> None:
@@ -1126,40 +1252,214 @@ class RiderInfinityBot:
     # ===================================================================
     #  14. OPTIMIZER MENU
     # ===================================================================
+    # ------------------------------------------------------------------
+    # Validation helpers
+    # ------------------------------------------------------------------
+    def _ask_date_range(self, default_days: int = 180) -> tuple[str, str]:
+        """Prompt for an ISO date range, defaulting to the last N days."""
+        from datetime import timedelta
+
+        today = datetime.now(timezone.utc).date()
+        default_from = (today - timedelta(days=default_days)).isoformat()
+        raw_from = input(
+            f"  {Fore.GREEN}From date [{default_from}]: {Style.RESET_ALL}"
+        ).strip() or default_from
+        raw_to = input(
+            f"  {Fore.GREEN}To date [{today.isoformat()}]: {Style.RESET_ALL}"
+        ).strip() or today.isoformat()
+        return raw_from, raw_to
+
+    @staticmethod
+    def _ask_int(prompt: str, default: int) -> int:
+        raw = input(
+            f"  {Fore.GREEN}{prompt} [{default}]: {Style.RESET_ALL}"
+        ).strip()
+        try:
+            return int(raw) if raw else default
+        except ValueError:
+            return default
+
     def optimizer_menu(self) -> None:
-        """Run the genetic optimizer or walk-forward analysis."""
-        print(f"\n  {Fore.CYAN}== Strategy Optimizer =={Style.RESET_ALL}")
-        print(f"  {Fore.WHITE}1. Genetic Optimizer{Style.RESET_ALL}")
-        print(f"  {Fore.WHITE}2. Walk-Forward Analysis{Style.RESET_ALL}")
-        print(f"  {Fore.WHITE}3. Monte Carlo Simulation{Style.RESET_ALL}")
+        """Run a genetic search, walk-forward analysis or Monte Carlo.
+
+        All three are real runs via :mod:`validation`.  This menu used to
+        offer them and then print the import statements the user would
+        need to wire the tools up themselves.
+        """
+        import validation
+
+        print(f"\n  {Fore.CYAN}== Strategy Validation =={Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}1. Genetic Optimizer     "
+              f"{Fore.CYAN}(search params without enumerating the grid)"
+              f"{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}2. Walk-Forward Analysis "
+              f"{Fore.CYAN}(do these params hold up out of sample?)"
+              f"{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}3. Monte Carlo           "
+              f"{Fore.CYAN}(how much of the curve was luck?)"
+              f"{Style.RESET_ALL}")
         print(f"  {Fore.WHITE}0. Back{Style.RESET_ALL}")
 
         choice = input(f"  {Fore.GREEN}> Option: {Style.RESET_ALL}").strip()
+        if choice == "0" or not choice:
+            return
 
-        if choice == "1":
-            if not self.strategy_name:
-                print(f"  {Fore.RED}Select a strategy first (option 4).{Style.RESET_ALL}")
-                return
-            print(f"\n  {Fore.YELLOW}Genetic Optimizer for '{self.strategy_name}'{Style.RESET_ALL}")
-            print(f"  Symbol: {self.symbol}, Timeframe: {self.timeframe_key}")
-            print(f"\n  {Fore.WHITE}Use the optimizer module directly:{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  from optimizer import GeneticOptimizer, GeneticConfig{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  ga = GeneticOptimizer(config, param_ranges, backtest_fn){Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  results = ga.run(){Style.RESET_ALL}")
+        if choice in ("1", "2") and not self.strategy_name:
+            print(f"  {Fore.RED}Select a strategy first (option 4)."
+                  f"{Style.RESET_ALL}")
+            return
 
-        elif choice == "2":
-            print(f"\n  {Fore.YELLOW}Walk-Forward Analysis{Style.RESET_ALL}")
-            print(f"  {Fore.WHITE}Validates strategy robustness via sliding windows.{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  from backtester import WalkForwardAnalyzer{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  wfa = WalkForwardAnalyzer(in_sample_bars=500, out_of_sample_bars=200){Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  result = wfa.run(backtest_fn, param_combos, data_df){Style.RESET_ALL}")
+        try:
+            if choice == "1":
+                self._run_genetic_search(validation)
+            elif choice == "2":
+                self._run_walk_forward(validation)
+            elif choice == "3":
+                self._run_monte_carlo(validation)
+        except ValueError as exc:
+            print(f"  {Fore.RED}{exc}{Style.RESET_ALL}")
+        except KeyboardInterrupt:
+            print(f"\n  {Fore.YELLOW}Cancelled.{Style.RESET_ALL}")
+        except Exception as exc:
+            self.logger.error("Validation run failed: %s", exc, exc_info=True)
+            print(f"  {Fore.RED}Run failed: {exc}{Style.RESET_ALL}")
 
-        elif choice == "3":
-            print(f"\n  {Fore.YELLOW}Monte Carlo Simulation{Style.RESET_ALL}")
-            print(f"  {Fore.WHITE}Shuffles trade order 1000x to test equity curve.{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  from backtester import MonteCarloSimulator{Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  mc = MonteCarloSimulator(num_simulations=1000){Style.RESET_ALL}")
-            print(f"  {Fore.CYAN}  result = mc.run(trades, initial_balance=10000){Style.RESET_ALL}")
+    def _run_genetic_search(self, validation) -> None:
+        """Evolve parameters for the selected strategy and print the best."""
+        print(f"\n  {Fore.YELLOW}Genetic search — {self.strategy_name} on "
+              f"{self.symbol} {self.timeframe_key}{Style.RESET_ALL}")
+        date_from, date_to = self._ask_date_range()
+        population = self._ask_int("Population size", 30)
+        generations = self._ask_int("Generations", 15)
+
+        print(f"  {Fore.CYAN}Running {population * generations} backtests …"
+              f"{Style.RESET_ALL}")
+
+        def _progress(pct: float, best: float, gen: int) -> None:
+            print(f"    gen {gen:>3}  best={best:.3f}  ({pct:.0f}%)")
+
+        out = validation.run_genetic(
+            self.strategy_name, self.symbol, self.timeframe_key,
+            date_from, date_to,
+            config=self.config, connector=self.connector,
+            population_size=population, generations=generations,
+            callback=_progress,
+        )
+
+        print(f"\n  {Fore.CYAN}Searched {out['evaluations']} of "
+              f"{out['search_space']} possible combinations "
+              f"({out['bars']} bars).{Style.RESET_ALL}")
+        if not out["results"]:
+            print(f"  {Fore.YELLOW}No profitable parameters found."
+                  f"{Style.RESET_ALL}")
+            return
+        print(f"  {Fore.CYAN}{'#':<4} {'profit factor':<15} params"
+              f"{Style.RESET_ALL}")
+        for idx, row in enumerate(out["results"][:10], 1):
+            metric = row.get(out["target_metric"], 0.0)
+            params = {
+                k: v for k, v in row.items()
+                if k not in ("total_trades", "wins", "losses", "win_rate",
+                             "total_pnl_pips", "total_pnl_money",
+                             "profit_factor", "max_drawdown_pct",
+                             "sharpe_ratio", "avg_win_pips", "avg_loss_pips")
+            }
+            print(f"  {Fore.WHITE}{idx:<4} {metric:<15.3f} {params}"
+                  f"{Style.RESET_ALL}")
+
+    def _run_walk_forward(self, validation) -> None:
+        """Validate the selected strategy on out-of-sample windows."""
+        print(f"\n  {Fore.YELLOW}Walk-forward — {self.strategy_name} on "
+              f"{self.symbol} {self.timeframe_key}{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}Optimises on each window, then scores the "
+              f"window after it.{Style.RESET_ALL}")
+        date_from, date_to = self._ask_date_range(default_days=365)
+        in_sample = self._ask_int("In-sample bars", 500)
+        out_sample = self._ask_int("Out-of-sample bars", 200)
+
+        print(f"  {Fore.CYAN}Running …{Style.RESET_ALL}")
+        result = validation.run_walk_forward(
+            self.strategy_name, self.symbol, self.timeframe_key,
+            date_from, date_to,
+            config=self.config, connector=self.connector,
+            in_sample_bars=in_sample, out_of_sample_bars=out_sample,
+            step_bars=out_sample,
+        )
+
+        if not result.windows:
+            print(f"  {Fore.YELLOW}No complete windows in that range."
+                  f"{Style.RESET_ALL}")
+            return
+
+        print(f"\n  {Fore.CYAN}{len(result.windows)} windows"
+              f"{Style.RESET_ALL}")
+        print(f"  In-sample avg      : {result.avg_in_sample_metric:.3f}")
+        print(f"  Out-of-sample avg  : {result.avg_out_of_sample_metric:.3f}")
+        colour = Fore.GREEN if result.is_robust else Fore.RED
+        print(f"  Robustness ratio   : {colour}{result.robustness_ratio:.3f}"
+              f"{Style.RESET_ALL}")
+        print(f"  OOS trades / P&L   : {result.total_out_of_sample_trades} / "
+              f"{result.overall_out_of_sample_pnl:+.2f}")
+        verdict = (
+            f"{Fore.GREEN}ROBUST — performance largely survived out of sample"
+            if result.is_robust else
+            f"{Fore.RED}FRAGILE — in-sample performance did not carry over; "
+            f"likely curve-fitted"
+        )
+        print(f"  Verdict            : {verdict}{Style.RESET_ALL}")
+
+    def _run_monte_carlo(self, validation) -> None:
+        """Reshuffle a stored backtest's trades to size the luck component."""
+        from backtester import BacktestDB
+
+        db = BacktestDB()
+        history = db.get_history(limit=15)
+        if not history:
+            print(f"  {Fore.YELLOW}No stored backtest runs. Run a backtest "
+                  f"first (the dashboard's Backtest tab).{Style.RESET_ALL}")
+            return
+
+        print(f"\n  {Fore.CYAN}{'#':<4} {'strategy':<12} {'symbol':<10} "
+              f"{'trades':<8} run id{Style.RESET_ALL}")
+        for idx, run in enumerate(history, 1):
+            print(f"  {Fore.WHITE}{idx:<4} "
+                  f"{run.get('strategy_name', '?'):<12} "
+                  f"{run.get('symbol', '?'):<10} "
+                  f"{run.get('total_trades', 0):<8} "
+                  f"{run.get('run_id', '')[:8]}{Style.RESET_ALL}")
+
+        pick = self._ask_int("Run #", 1)
+        if not 1 <= pick <= len(history):
+            print(f"  {Fore.RED}Invalid selection.{Style.RESET_ALL}")
+            return
+        run = history[pick - 1]
+        trades = db.get_trades(run["run_id"])
+        sims = self._ask_int("Simulations", 1000)
+
+        print(f"  {Fore.CYAN}Reshuffling {len(trades)} trades {sims}× …"
+              f"{Style.RESET_ALL}")
+        result = validation.run_monte_carlo(
+            trades,
+            initial_balance=run.get("initial_balance", 10_000.0),
+            num_simulations=sims,
+        )
+
+        print(f"\n  {Fore.CYAN}Monte Carlo — {result.num_simulations} "
+              f"simulations{Style.RESET_ALL}")
+        print(f"  Median return        : {result.median_return:+.2f}")
+        print(f"  5th percentile       : {result.percentile_5_return:+.2f}")
+        print(f"  95th percentile      : {result.percentile_95_return:+.2f}")
+        print(f"  Worst case           : {result.worst_case_return:+.2f}")
+        print(f"  Median max drawdown  : {result.median_max_drawdown:.2f}")
+        print(f"  Worst max drawdown   : {result.worst_case_max_drawdown:.2f}")
+        prob = result.probability_of_profit
+        colour = Fore.GREEN if prob >= 70 else (
+            Fore.YELLOW if prob >= 50 else Fore.RED
+        )
+        print(f"  Probability of profit: {colour}{prob:.1f}%{Style.RESET_ALL}")
+        print(f"\n  {Fore.WHITE}Size risk from the 5th percentile, not the "
+              f"median — the historical curve is one sample."
+              f"{Style.RESET_ALL}")
 
     # ===================================================================
     #  15. RISK DASHBOARD
@@ -1289,7 +1589,11 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    bot = RiderInfinityBot()
+    try:
+        bot = RiderInfinityBot()
+    except ConfigError as exc:
+        print(f"{Fore.RED}[CONFIG ERROR] {exc}{Style.RESET_ALL}")
+        sys.exit(1)
 
     # If any strategy was given on CLI, pass args to skip menus.
     bot.run(args=args if args.strategy else None)

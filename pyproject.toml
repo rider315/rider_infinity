@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rider-infinity"
+version = "1.0.0"
+description = "Automated MetaTrader 5 trading platform with pluggable strategies, risk management and a web dashboard."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Mirrors requirements.txt. MetaTrader5 is Windows-only, so it is marked
+# as such: the dashboard, backtester and test-suite all import fine
+# without it on Linux (see tests/mt5_stub.py), and leaving it unmarked
+# makes `pip install -e .` fail outright on a non-Windows host.
+dependencies = [
+    "MetaTrader5; sys_platform == 'win32'",
+    "pandas",
+    "numpy",
+    "python-dotenv",
+    "colorama",
+    "flask",
+    "anthropic>=0.40.0",
+    "feedparser>=6.0.0",
+    "boto3>=1.28.0",
+    "pyarrow>=12.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyflakes"]
+
+[project.scripts]
+rider-infinity = "bot:main"
+rider-dashboard = "dashboard:main"
+
+[tool.setuptools]
+# A flat layout of top-level modules, not a package.
+py-modules = [
+    "backtest_core", "backtester", "bot", "bot_history", "config",
+    "dashboard", "evaluation_matrix", "event_bus", "instruments",
+    "logic_version", "market_data", "mt5_connector", "multi_bot",
+    "optimizer", "performance", "profile_manager", "risk_manager",
+    "session_manager", "trade_manager", "trailing_profiles", "utils",
+    "validation", "web_security", "wsgi",
+]
+
+[tool.setuptools.packages.find]
+include = ["automation*", "cloud*", "news_intelligence*", "strategies*"]

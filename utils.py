@@ -19,13 +19,23 @@ from typing import Any, Optional
 
 from colorama import Fore, Style, init as colorama_init
 
+# Pip arithmetic lives in ``instruments`` (dependency-free, so the
+# cloud worker can ship it) and is re-exported here for the many
+# callers that already do ``from utils import pips_to_price``.
+from instruments import pip_size, pips_to_price, price_to_pips  # noqa: F401
+
 # Initialise colorama once for the process (autoreset keeps every
 # print/log statement self-contained).
 colorama_init(autoreset=True)
 
 # Resolve the project root so log paths work regardless of cwd.
 _PROJECT_ROOT = Path(__file__).resolve().parent
-_LOG_DIR = _PROJECT_ROOT / "logs"
+# Log destination. Overridable via RI_LOG_DIR so a test run (or a
+# read-only checkout) does not write into the project tree.
+_LOG_DIR = Path(
+    os.getenv("RI_LOG_DIR")
+    or Path(__file__).resolve().parent / "logs"
+)
 
 
 # =====================================================================
@@ -99,31 +109,53 @@ def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
 # Pip / price helpers
 # =====================================================================
 
-def pips_to_price(pips: float, symbol: str, point: float) -> float:
-    """Convert a pip value to a price delta for *symbol*.
+def utc_now() -> datetime:
+    """Return the current UTC time as a **naive** ``datetime``.
 
-    Forex convention:
-    * **JPY pairs** – 1 pip = 0.01 = 100 points.
-    * **All others** – 1 pip = 0.0001 = 10 points.
+    Equivalent to the deprecated ``datetime.utcnow()``, which Python 3.12
+    warns about and will eventually remove.
 
-    Args:
-        pips:   Number of pips (e.g. ``50``).
-        symbol: Instrument name, used to detect JPY pairs.
-        point:  The symbol's point size (from ``symbol_info().point``).
-
-    Returns:
-        The equivalent price delta as a float.
+    Deliberately naive rather than timezone-aware: these timestamps are
+    serialised with ``.isoformat()`` into the trade-history DB, the
+    journal CSV and the saved profiles, and an aware datetime would add a
+    ``+00:00`` suffix.  That would not match the rows already stored, and
+    the string comparisons the performance queries do on those columns
+    would silently stop lining up.  Changing the stored format is a
+    migration, not a deprecation fix — so this keeps the format and gives
+    that migration a single place to happen.
     """
-    pip_size = 100 * point if "JPY" in symbol.upper() else 10 * point
-    return pips * pip_size
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utc_from_timestamp(epoch: float) -> datetime:
+    """Convert *epoch* seconds to a **naive** UTC ``datetime``.
+
+    The non-deprecated equivalent of ``datetime.utcfromtimestamp``.  See
+    :func:`utc_now` for why the result is naive.
+    """
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None)
 
 
 def compute_atr(df, period: int = 14) -> float:
     """Return the latest Average True Range (a *price* value) from OHLC data.
 
-    Uses Wilder's true range = max(high-low, |high-prev_close|, |low-prev_close|)
-    smoothed by a simple moving average over *period* bars.  Returns ``0.0`` if
-    the data is insufficient or the required columns are missing.
+    True range is ``max(high−low, |high−prev_close|, |low−prev_close|)``,
+    smoothed with **Wilder's** exponential method (``alpha = 1/period``) —
+    the standard ATR, and the same smoothing
+    :func:`strategies.indicators.atr` uses.
+
+    Returns ``0.0`` when the data is insufficient, a required column is
+    missing, or the result is NaN, so a caller sizing a stop from this
+    gets a falsy value it can fall back on rather than a NaN that
+    silently propagates into an order.
+
+    .. note::
+       This used to apply a **simple** moving average to the true range
+       while the strategy layer used Wilder's. The live engine sized
+       stops from this function and the strategies gated their entries on
+       the other, so two different ATRs were in play on the same candle —
+       they diverge most exactly when volatility shifts, which is when the
+       stop distance matters.
     """
     try:
         if df is None or len(df) < period + 1:
@@ -136,28 +168,10 @@ def compute_atr(df, period: int = 14) -> float:
         tr = (high - low).abs()
         tr = tr.combine((high - prev_close).abs(), max)
         tr = tr.combine((low - prev_close).abs(), max)
-        atr = tr.rolling(window=period).mean().iloc[-1]
+        atr = tr.ewm(alpha=1.0 / period, adjust=False).mean().iloc[-1]
         return float(atr) if atr == atr else 0.0  # NaN guard
     except Exception:
         return 0.0
-
-
-def price_to_pips(price_delta: float, symbol: str, point: float) -> float:
-    """Convert a price delta to pips for *symbol* (inverse of
-    :func:`pips_to_price`).
-
-    Args:
-        price_delta: Absolute price difference.
-        symbol:      Instrument name, used to detect JPY pairs.
-        point:       The symbol's point size.
-
-    Returns:
-        The equivalent number of pips as a float.
-    """
-    pip_size = 100 * point if "JPY" in symbol.upper() else 10 * point
-    if pip_size == 0:
-        return 0.0
-    return price_delta / pip_size
 
 
 # =====================================================================

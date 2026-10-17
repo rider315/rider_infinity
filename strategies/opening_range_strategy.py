@@ -90,6 +90,43 @@ class OpeningRangeBreakoutStrategy(BaseStrategy):
         # as price stays beyond the range, and a Quick-Exit bot re-enters all
         # session long. Classic ORB takes the FIRST breakout of a session only.
         self._fired: dict[tuple[str, pd.Timestamp], str] = {}
+        # Latch so the unusable-timeframe warning below is logged once per
+        # instance rather than on every candle.
+        self._warned_timeframe: bool = False
+
+    def _warn_if_timeframe_unusable(self, df: pd.DataFrame, symbol: str) -> None:
+        """Say so, once, if the bars are too coarse for a session strategy.
+
+        This strategy only signals inside a window that opens minutes
+        after a session open, so on D1 or W1 bars — whose timestamps all
+        land at 00:00 — ``_active_session`` never matches and ``analyze``
+        returns HOLD on every candle, forever.
+
+        That used to be silent at every log level. A bot created on D1
+        from the dashboard just sat there showing HOLD, indistinguishable
+        from "no setup right now", with nothing to explain why it would
+        never trade. Backtesting the strategy on daily data is what
+        surfaced it: zero signals over 5031 bars and no diagnostic.
+        """
+        if self._warned_timeframe or len(df) < 3:
+            return
+        try:
+            spacing = pd.Timedelta(
+                df["time"].iloc[-1] - df["time"].iloc[-2]
+            )
+        except (TypeError, KeyError, AttributeError):
+            return
+        if spacing < pd.Timedelta(hours=4):
+            return
+
+        self._warned_timeframe = True
+        logger.warning(
+            "[%s] %s — bars are %s apart. This strategy trades a window "
+            "that opens %d minutes after a session open, so it cannot "
+            "produce a signal on a timeframe this coarse and will hold "
+            "forever. Use an intraday timeframe (M5-H1).",
+            self.name, symbol, spacing, self.or_minutes,
+        )
 
     @property
     def name(self) -> str:
@@ -111,6 +148,8 @@ class OpeningRangeBreakoutStrategy(BaseStrategy):
             return self._hold(symbol)
         if not {"high", "low", "close"}.issubset(df.columns):
             return self._hold(symbol)
+
+        self._warn_if_timeframe_unusable(df, symbol)
 
         ts = df["time"].iloc[-1]
         try:
