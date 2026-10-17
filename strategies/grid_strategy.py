@@ -17,11 +17,15 @@ from __future__ import annotations
 
 import logging
 
+
 import pandas as pd
 
 from instruments import estimate_pip_size
 
+from evaluation_matrix import EvalScore
+
 from .base import BaseStrategy, Signal, SignalAction, TriggerProximity
+
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +115,8 @@ class GridStrategy(BaseStrategy):
             # Below center → BUY
             level_price = center + grid_position * self.grid_size_pips * pip_size
             reason = (
-                f"Grid BUY level {grid_position} triggered at "
-                f"{current_price:.5f} (center={center:.5f})"
+                f"Grid BUY level {grid_position} (@{level_price:.5f}) "
+                f"triggered at {current_price:.5f} (center={center:.5f})"
             )
             logger.info("[%s] %s — %s", self.name, symbol, reason)
             return Signal(
@@ -128,8 +132,8 @@ class GridStrategy(BaseStrategy):
             # Above center → SELL
             level_price = center + grid_position * self.grid_size_pips * pip_size
             reason = (
-                f"Grid SELL level +{grid_position} triggered at "
-                f"{current_price:.5f} (center={center:.5f})"
+                f"Grid SELL level +{grid_position} (@{level_price:.5f}) "
+                f"triggered at {current_price:.5f} (center={center:.5f})"
             )
             logger.info("[%s] %s — %s", self.name, symbol, reason)
             return Signal(
@@ -179,9 +183,8 @@ class GridStrategy(BaseStrategy):
             },
         )
 
-    def evaluate(self, df: pd.DataFrame, symbol: str) -> "EvalScore":
+    def evaluate(self, df: pd.DataFrame, symbol: str) -> EvalScore:
         """Return an evaluation score for the evaluation matrix."""
-        from evaluation_matrix import EvalScore
 
         signal = self.analyze(df, symbol)
 

@@ -26,15 +26,12 @@ import pandas as pd
 from config import Config, TIMEFRAME_MAP
 from strategies import get_strategy
 from strategies.base import SignalAction
-from utils import pips_to_price, price_to_pips, setup_logger
-from backtester import BacktestDB, BacktestTrade
+from utils import setup_logger
+from backtester import BacktestDB
 # The simulation kernel lives in backtest_core (pure, no MT5, no cloud
 # dependency). The sweep previously imported it from cloud.worker, so the
 # local optimiser could not run without the cloud package installed.
 from backtest_core import (
-    calc_pnl_pips as _backtest_calc_pnl_pips,
-    check_sl_tp as _backtest_check_sl_tp,
-    compute_metrics as _backtest_compute_metrics,
     pip_value_per_lot as _pip_value_per_lot,
     run_single as _backtest_run_single,
 )
@@ -918,15 +915,37 @@ class GeneticOptimizer:
 
             population = new_pop
 
-        # Final evaluation
+        # Final evaluation.
+        #
+        # ``best_ever`` is included explicitly. Selection, crossover and
+        # mutation are all stochastic, so the best individual found in an
+        # early generation need not survive into the last one — and this
+        # scored only the final population, so the run could report a
+        # worse result than it had actually found. That is the entire
+        # reason the loop above tracks ``best_ever``, and it was
+        # previously computed and then thrown away.
+        candidates = list(population)
+        if best_ever is not None and best_ever not in candidates:
+            candidates.append(best_ever)
+
         results = []
-        for individual in population:
+        seen: set = set()
+        for individual in candidates:
+            # The population converges, so the same genome recurs many
+            # times; each backtest is expensive enough to be worth
+            # de-duplicating.
+            key = tuple(sorted(individual.items()))
+            if key in seen:
+                continue
+            seen.add(key)
             try:
                 result = self.backtest_fn(individual)
                 result["params"] = individual
                 results.append(result)
             except Exception:
-                pass
+                self._logger.debug(
+                    "Final evaluation failed for %s", individual,
+                )
 
         results.sort(key=lambda r: r.get(self.target_metric, 0), reverse=True)
         return results[:20]

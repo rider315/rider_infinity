@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -29,7 +30,14 @@ import mt5_stub  # noqa: E402
 
 sys.modules.setdefault("MetaTrader5", mt5_stub)
 
-# -- 2. Provide the credentials Config requires ----------------------
+# -- 2. Keep logs out of the project tree ----------------------------
+# setup_logger() attaches a FileHandler at import time, so merely
+# importing a module writes logs/bot.log into the checkout.
+os.environ.setdefault(
+    "RI_LOG_DIR", str(Path(tempfile.gettempdir()) / "rider-infinity-tests"),
+)
+
+# -- 3. Provide the credentials Config requires ----------------------
 # Set before import so a developer's real .env can never leak into a
 # test run (python-dotenv does not override existing env vars).
 os.environ.setdefault("MT5_LOGIN", "1")

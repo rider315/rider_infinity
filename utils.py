@@ -30,7 +30,12 @@ colorama_init(autoreset=True)
 
 # Resolve the project root so log paths work regardless of cwd.
 _PROJECT_ROOT = Path(__file__).resolve().parent
-_LOG_DIR = _PROJECT_ROOT / "logs"
+# Log destination. Overridable via RI_LOG_DIR so a test run (or a
+# read-only checkout) does not write into the project tree.
+_LOG_DIR = Path(
+    os.getenv("RI_LOG_DIR")
+    or Path(__file__).resolve().parent / "logs"
+)
 
 
 # =====================================================================

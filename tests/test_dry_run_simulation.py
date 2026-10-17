@@ -28,13 +28,17 @@ class _StubMarketData:
 
 
 @pytest.fixture
-def manager(monkeypatch, config):
+def manager(monkeypatch, config, tmp_path):
     monkeypatch.setattr(multi_bot, "BotHistoryDB", _StubHistoryDB)
     config.max_trade_hours = 48
-    return MultiBotManager(
+    mgr = MultiBotManager(
         config=config, connector=None, market_data=_StubMarketData(),
         session_mgr=None, order_mgr=None, risk_mgr=None,
     )
+    # Never write to the project's data/bot_configs.json —
+    # add_bot() persists, and that file is the operator's live fleet.
+    mgr._persist_path = tmp_path / "bot_configs.json"
+    return mgr
 
 
 @pytest.fixture

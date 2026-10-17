@@ -141,8 +141,6 @@ def run(df, strategy, symbol, point, digits, mode, lot=0.10, max_open=5,
     # metrics
     n = len(closed)
     wins = [p for p in closed if p > 0]
-    losses = [p for p in closed if p < 0]
-    gp, gl = sum(wins), abs(sum(losses))
     pf = profit_factor(closed)
     return {
         "mode": mode, "trades": n,

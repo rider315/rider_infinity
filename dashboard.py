@@ -21,7 +21,7 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1890,7 +1890,6 @@ def create_app() -> Flask:
 
             expiration = None
             if exp_str:
-                from datetime import datetime
                 expiration = datetime.fromisoformat(str(exp_str))
 
             ok = _order_mgr.modify_pending_order(
@@ -2315,7 +2314,6 @@ def _init_news_engine(config: Config) -> dict | None:
                     if analyzer and not engine["analysis_paused"]:
                         unanalyzed = cache.get_unanalyzed_articles(limit=5)
                         # Filter out old articles (>6h) to avoid burning API on stale news
-                        from datetime import datetime, timezone, timedelta
                         cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
                         fresh = []
                         for a in unanalyzed:

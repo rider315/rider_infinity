@@ -17,6 +17,9 @@ from typing import Optional
 
 import pandas as pd
 
+from evaluation_matrix import EvalScore
+
+
 
 # ---------------------------------------------------------------------------
 # Signal types
@@ -151,7 +154,7 @@ class BaseStrategy(ABC):
         """
         return TriggerProximity()
 
-    def evaluate(self, df: pd.DataFrame, symbol: str) -> "EvalScore":
+    def evaluate(self, df: pd.DataFrame, symbol: str) -> EvalScore:
         """Return an evaluation score for the evaluation matrix.
 
         Default implementation converts the ``analyze()`` Signal into an
@@ -168,7 +171,6 @@ class BaseStrategy(ABC):
         -------
         EvalScore
         """
-        from evaluation_matrix import EvalScore
 
         signal = self.analyze(df, symbol)
 

@@ -24,14 +24,18 @@ class _StubHistoryDB:
 
 
 @pytest.fixture
-def manager(monkeypatch, config):
+def manager(monkeypatch, config, tmp_path):
     monkeypatch.setattr(multi_bot, "BotHistoryDB", _StubHistoryDB)
     config.magic_number = MAGIC
     config.adopt_untagged_positions = False
-    return MultiBotManager(
+    mgr = MultiBotManager(
         config=config, connector=None, market_data=None,
         session_mgr=None, order_mgr=None, risk_mgr=None,
     )
+    # Never write to the project's data/bot_configs.json —
+    # add_bot() persists, and that file is the operator's live fleet.
+    mgr._persist_path = tmp_path / "bot_configs.json"
+    return mgr
 
 
 def _add(manager, symbol="EURUSD", strategy="ema"):

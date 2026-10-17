@@ -33,7 +33,10 @@ from typing import Any
 
 import pandas as pd
 
+from evaluation_matrix import EvalScore
+
 from .base import BaseStrategy, Signal, SignalAction, TriggerProximity
+
 
 logger = logging.getLogger(__name__)
 
@@ -324,9 +327,8 @@ class DSLStrategy(BaseStrategy):
             detail=best_rule.raw_text.strip(),
         )
 
-    def evaluate(self, df: pd.DataFrame, symbol: str) -> "EvalScore":
+    def evaluate(self, df: pd.DataFrame, symbol: str) -> EvalScore:
         """Return an evaluation score for the evaluation matrix."""
-        from evaluation_matrix import EvalScore
 
         signal = self.analyze(df, symbol)
 

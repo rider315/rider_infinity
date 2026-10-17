@@ -18,6 +18,7 @@ import logging
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -40,7 +41,7 @@ from backtest_core import (
 from config import Config, TIMEFRAME_MAP
 from strategies import get_strategy
 from strategies.base import SignalAction
-from utils import pips_to_price, price_to_pips, setup_logger
+from utils import pips_to_price, setup_logger
 
 logger = setup_logger("backtester")
 
@@ -236,16 +237,29 @@ class BacktestDB:
         self._lock = threading.Lock()
         self._init_tables()
 
-    def _conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _conn(self):
+        """Yield a connection and **close** it on the way out.
+
+        Callers use ``with self._lock, self._conn() as conn:``.  This
+        previously returned a bare connection, and ``sqlite3``'s own
+        context manager commits or rolls back but does **not** close — so
+        every one of the thirteen call sites leaked a connection and its
+        file handle.  The dashboard polls run history on a timer, which
+        made that leak unbounded over a long session.
+        """
         conn = sqlite3.connect(self._db_path, timeout=10)
-        # WAL lets the dashboard read run history while a backtest
-        # thread is still writing, instead of blocking on the writer
-        # (the other two stores in this project already use it).
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            # WAL lets the dashboard read run history while a backtest
+            # thread is still writing, instead of blocking on the writer
+            # (the other two stores in this project already use it).
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.row_factory = sqlite3.Row
+            with conn:          # commit on success, roll back on error
+                yield conn
+        finally:
+            conn.close()
 
     def _init_tables(self) -> None:
         with self._lock, self._conn() as conn:

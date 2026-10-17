@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        # MetaTrader5 is Windows-only and boto3/feedparser/anthropic are
+        # only needed by the cloud and news subsystems, which the suite
+        # stubs. Installing just what the tests import keeps CI fast.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas numpy python-dotenv colorama flask
+          python -m pip install pytest pyflakes
+
+      - name: Check for undefined names and unused locals
+        # Fails on real errors only; unused imports are reported but not
+        # fatal, so a legacy import does not block a fix.
+        run: |
+          python -m pyflakes $(git ls-files '*.py') > pyflakes.txt || true
+          cat pyflakes.txt
+          ! grep -E "undefined name|assigned to but never used|redefinition" pyflakes.txt
+
+      - name: Run tests
+        run: python -m pytest
