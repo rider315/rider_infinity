@@ -115,10 +115,18 @@ class BaseAction(ABC):
 class PauseTradingAction(BaseAction):
     """Pause trading for a specified duration.
 
-    Sets ``context['trading_paused']`` to ``True`` and
-    ``context['trading_paused_until']`` to the UTC expiry timestamp.
-    The bot's main loop should check these flags before placing new
-    trades.
+    Blocks new entries by arming :data:`trade_manager.GATE`, the
+    process-wide switch every trading loop checks before opening a
+    position.  Positions already open are left alone — breakeven, the
+    time-stop and Quick Exit keep managing them.
+
+    ``context['trading_paused']`` and ``context['trading_paused_until']``
+    are also set, for conditions and log consumers that inspect the
+    context.  Those keys are informational only: the context dict is
+    rebuilt on every evaluation, so it is the gate that actually holds
+    the pause.  (Before the gate existed, those keys were the *only*
+    effect this action had, and nothing read them — so the Emergency Stop
+    rule closed every position and then let the bots re-enter at once.)
 
     Parameters
     ----------
@@ -138,20 +146,24 @@ class PauseTradingAction(BaseAction):
         return f"Pauses trading for {self.duration_minutes} minutes"
 
     def execute(self, context: dict) -> ActionResult:
-        """Set the trading-paused flags in *context*.
+        """Arm the global trading gate and mirror the state into *context*.
 
         Parameters
         ----------
         context : dict
-            Will be mutated to include ``trading_paused`` and
-            ``trading_paused_until`` keys.
+            Mutated to include ``trading_paused`` and
+            ``trading_paused_until`` for inspection; the authoritative
+            state lives in :data:`trade_manager.GATE`.
 
         Returns
         -------
         ActionResult
         """
-        expiry = datetime.now(timezone.utc) + timedelta(
-            minutes=self.duration_minutes
+        import trade_manager
+
+        expiry = trade_manager.GATE.pause(
+            self.duration_minutes,
+            reason=context.get("pause_reason", "automation rule"),
         )
 
         context["trading_paused"] = True

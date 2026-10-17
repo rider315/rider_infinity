@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -20,6 +20,8 @@ import MetaTrader5 as mt5
 
 from config import Config
 from instruments import is_crypto, pip_value_per_lot
+from session_manager import SessionManager
+from utils import utc_now
 
 # File where risk state is persisted across restarts
 _STATE_FILE = Path(__file__).resolve().parent / "data" / "risk_state.json"
@@ -59,7 +61,9 @@ class RiskManager:
     # ------------------------------------------------------------------
     # Construction
     # ------------------------------------------------------------------
-    def __init__(self, config: Config, connector) -> None:
+    def __init__(
+        self, config: Config, connector, session_mgr: SessionManager | None = None,
+    ) -> None:
         """
         Parameters
         ----------
@@ -67,9 +71,14 @@ class RiskManager:
             Application configuration instance.
         connector : MT5Connector
             Live connection wrapper — used to pull account and symbol data.
+        session_mgr : SessionManager, optional
+            Owner of the forex calendar, consulted by :meth:`can_trade`.
+            A fresh one is created when not supplied; pass the
+            application's instance to keep a single source of truth.
         """
         self.config = config
         self.connector = connector
+        self.session_mgr = session_mgr or SessionManager()
         self.logger = logging.getLogger("RiskManager")
 
         # Daily tracking — call reset_daily_tracking() at the start of
@@ -325,16 +334,18 @@ class RiskManager:
             ``(True, "OK")`` when all checks pass, otherwise
             ``(False, "<reason>")`` explaining which check failed.
         """
-        # 1 — Market open? (basic weekend check). Crypto trades 24/7, so the
-        # forex weekend + trading-hours calendar is skipped for crypto symbols.
-        now = datetime.utcnow()
-        if not is_crypto(symbol):
-            weekday = now.weekday()  # 0=Mon … 6=Sun
-            if weekday == 6 or (weekday == 5 and now.hour >= 22):
-                return (False, "Market is closed (weekend).")
-            if weekday == 0 and now.hour < 0:
-                return (False, "Market has not opened yet (Sunday evening).")
+        # 1 — Market open? Delegated to SessionManager, which owns the forex
+        # calendar (weekend closure, crypto 24/7, session windows). This used
+        # to be a second, hand-rolled copy of that calendar here, and it
+        # disagreed with the real one: it treated Saturday before 22:00 UTC as
+        # open, treated the whole of Sunday as closed even after the 22:00
+        # reopen, and carried an unreachable ``weekday == 0 and now.hour < 0``
+        # branch that could never fire.
+        now = datetime.now(timezone.utc)
+        if not self.session_mgr.is_market_open(now=now, symbol=symbol):
+            return (False, "Market is closed (weekend / no active session).")
 
+        if not is_crypto(symbol):
             # 1b — Trading-hours window (UTC). Backtests show off-session hours
             # produce mostly losing/noise trades; this gate restricts entries to
             # the configured window (default 0..24 = no restriction).
@@ -696,7 +707,7 @@ class RiskManager:
             if equity > self._risk_state["peak_equity"]:
                 self._risk_state["peak_equity"] = equity
 
-        self._risk_state["last_update"] = datetime.utcnow().isoformat()
+        self._risk_state["last_update"] = utc_now().isoformat()
         self._save_state()
         return dict(self._risk_state)
 

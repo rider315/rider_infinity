@@ -22,6 +22,7 @@ from .triggers import (
 )
 from .conditions import BaseCondition
 from .actions import BaseAction, PauseTradingAction, CloseAllPositionsAction, LogAction
+from utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ class AutomationRule:
 
     # Auto-populated
     rule_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utc_now)
     last_executed: datetime | None = None
     execution_count: int = 0
 
@@ -212,7 +213,7 @@ class AutomationEngine:
                     })
 
             # 4. Update rule state
-            now = datetime.utcnow()
+            now = utc_now()
             rule.last_executed = now
             rule.execution_count += 1
 

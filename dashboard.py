@@ -20,6 +20,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from typing import Any
 from flask import Flask, Response, jsonify, render_template, request
 
 import performance
+import trade_manager
 import web_security
 from config import Config, ConfigError, SYMBOL_GROUPS, TIMEFRAME_OPTIONS, TIMEFRAME_MAP
 from market_data import MarketDataFeed
@@ -36,7 +38,7 @@ from order_manager import OrderManager
 from risk_manager import RiskManager
 from session_manager import SessionManager
 from strategies import list_strategies
-from utils import setup_logger
+from utils import setup_logger, utc_now
 
 # ── Module-level references (populated in ``create_app`` / ``main``) ──
 _config: Config | None = None
@@ -47,7 +49,14 @@ _order_mgr: OrderManager | None = None
 _risk_mgr: RiskManager | None = None
 _bot_mgr: MultiBotManager | None = None
 _news_engine: Any | None = None  # NewsIntelligenceEngine (lazy import)
+_automation_engine: Any | None = None  # AutomationEngine (lazy import)
 _trailing_positions: dict = {}  # ticket -> {profile, params, enabled}
+
+#: How often the automation rules are evaluated, in seconds.  The
+#: triggers that matter here (drawdown, volatility spikes) move on the
+#: scale of minutes, and each pass queries account state, so there is
+#: nothing to gain from a tighter loop.
+_AUTOMATION_INTERVAL_SEC = 15
 
 # Guards ``_init_subsystems`` against running twice in one process.  The
 # Werkzeug reloader re-executes this module in a child process, and a
@@ -230,28 +239,106 @@ def create_app() -> Flask:
 
     @app.route("/api/automation/rules", methods=["GET"])
     def api_automation_rules():
-        """Return automation rules status."""
+        """Return the live automation rules and their execution counts.
+
+        Reports the one engine this process owns.  Previously this built
+        a throwaway engine per request, loaded the defaults into it and
+        listed those — so no rule was ever evaluated and
+        ``execution_count`` was always 0.
+        """
         try:
-            from automation.engine import AutomationEngine
-            engine = AutomationEngine()
-            try:
-                for rule in AutomationEngine.create_default_rules():
-                    engine.add_rule(rule)
-            except Exception:
-                pass
-            rules = engine.get_rules()
+            if _automation_engine is None:
+                return jsonify([])
             return jsonify([
                 {
+                    "rule_id": r.rule_id,
                     "name": r.name,
                     "enabled": r.enabled,
                     "one_shot": r.one_shot,
                     "execution_count": r.execution_count,
+                    "last_executed": (
+                        r.last_executed.isoformat() if r.last_executed else None
+                    ),
+                    "trigger": r.trigger.name,
+                    "actions": [a.name for a in r.actions],
                 }
-                for r in rules
+                for r in _automation_engine.get_rules()
             ])
         except Exception as exc:
             logger.error("GET /api/automation/rules error: %s", exc)
             return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/automation/log", methods=["GET"])
+    def api_automation_log():
+        """Return the automation engine's recent execution log."""
+        try:
+            if _automation_engine is None:
+                return jsonify([])
+            log = _automation_engine.get_execution_log()
+            return jsonify(log[-100:])
+        except Exception as exc:
+            logger.error("GET /api/automation/log error: %s", exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/automation/rules/<rule_id>/toggle", methods=["POST"])
+    def api_automation_toggle(rule_id: str):
+        """Enable or disable a single automation rule."""
+        try:
+            if _automation_engine is None:
+                return jsonify({"error": "Automation engine not running."}), 503
+            rule = _automation_engine.get_rule(rule_id)
+            if rule is None:
+                return jsonify({"error": f"Rule {rule_id} not found."}), 404
+
+            data = request.get_json(silent=True) or {}
+            enabled = bool(data.get("enabled", not rule.enabled))
+            if enabled:
+                _automation_engine.enable_rule(rule_id)
+            else:
+                _automation_engine.disable_rule(rule_id)
+            return jsonify({"rule_id": rule_id, "enabled": enabled})
+        except Exception as exc:
+            logger.error("POST /api/automation/rules/%s/toggle error: %s",
+                         rule_id, exc)
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/trading-gate", methods=["GET", "POST"])
+    def api_trading_gate():
+        """Read or set the global pause that blocks new entries.
+
+        GET  -> ``{"paused", "reason", "until"}``.
+        POST ``{"paused": true, "minutes": 30, "reason": "..."}`` to pause,
+        ``{"paused": false}`` to resume.
+
+        Pausing blocks new entries across every bot in the fleet.  Open
+        positions are untouched and keep being managed; use
+        ``/api/positions/close-all`` to flatten.
+        """
+        if request.method == "GET":
+            return jsonify(trade_manager.GATE.to_dict())
+
+        data = request.get_json(silent=True) or {}
+        if not bool(data.get("paused", True)):
+            trade_manager.GATE.resume()
+            logger.info("Trading gate RESUMED from the dashboard.")
+            return jsonify(trade_manager.GATE.to_dict())
+
+        try:
+            minutes = float(data.get("minutes", 30))
+        except (TypeError, ValueError):
+            return jsonify({"error": "minutes must be a number."}), 400
+        if not 0 < minutes <= 7 * 24 * 60:
+            return jsonify({
+                "error": "minutes must be between 0 and 10080 (one week)."
+            }), 400
+
+        reason = str(data.get("reason") or "paused from dashboard")[:200]
+        trade_manager.GATE.pause(minutes, reason=reason)
+        logger.warning(
+            "Trading gate PAUSED for %.0f min from the dashboard: %s",
+            minutes, reason,
+        )
+        return jsonify(trade_manager.GATE.to_dict())
 
     # ==================================================================
     #  POST / DELETE endpoints
@@ -526,7 +613,7 @@ def create_app() -> Flask:
             )
             csv_text = performance.trades_to_csv(trades)
             scope = f"bot{f['bot_id']}" if f["bot_id"] else "all"
-            fname = f"trades_{scope}_{datetime.utcnow():%Y%m%d_%H%M%S}.csv"
+            fname = f"trades_{scope}_{utc_now():%Y%m%d_%H%M%S}.csv"
             return Response(
                 csv_text,
                 mimetype="text/csv",
@@ -552,7 +639,7 @@ def create_app() -> Flask:
             if request.args.get("download"):
                 import json as _json
                 scope = f"bot{f['bot_id']}" if f["bot_id"] else "all"
-                fname = f"performance_{scope}_{datetime.utcnow():%Y%m%d_%H%M%S}.json"
+                fname = f"performance_{scope}_{utc_now():%Y%m%d_%H%M%S}.json"
                 return Response(
                     _json.dumps(summary, indent=2),
                     mimetype="application/json",
@@ -1832,7 +1919,7 @@ def _init_subsystems(require_mt5: bool = True) -> None:
     _market_data = MarketDataFeed()
     _session_mgr = SessionManager()
     _order_mgr = OrderManager(_config, dry_run=False)  # always live; per-bot toggle controls dry/live
-    _risk_mgr = RiskManager(_config, _connector)
+    _risk_mgr = RiskManager(_config, _connector, session_mgr=_session_mgr)
     _bot_mgr = MultiBotManager(
         config=_config,
         connector=_connector,
@@ -1848,6 +1935,9 @@ def _init_subsystems(require_mt5: bool = True) -> None:
     if restored > 0:
         logger.info("Restored %d bot(s) from previous session.", restored)
 
+    # -- Automation engine --------------------------------------------------
+    _init_automation_engine()
+
     # -- News Intelligence Engine ------------------------------------------
     _news_engine = _init_news_engine(_config)
 
@@ -1861,6 +1951,94 @@ def _init_subsystems(require_mt5: bool = True) -> None:
             logger.info("Cloud cleanup started in background.")
         except Exception as exc:
             logger.debug("Cloud cleanup skipped: %s", exc)
+
+
+def _automation_context() -> dict:
+    """Build the runtime state the automation triggers read.
+
+    Rebuilt on every pass, which is why a pause has to live in
+    :data:`trade_manager.GATE` rather than in this dict.
+    """
+    context: dict[str, Any] = {
+        "symbol": _config.default_symbol,
+        "connector": _connector,
+        "order_manager": _order_mgr,
+        "bot_manager": _bot_mgr,
+        "trading_paused": trade_manager.GATE.is_paused,
+    }
+
+    try:
+        positions = _order_mgr.get_open_positions() or []
+        context["open_positions"] = len(positions)
+        context["positions"] = positions
+        context["total_pnl"] = sum(p.get("profit", 0.0) for p in positions)
+    except Exception:
+        context["open_positions"] = 0
+
+    try:
+        context["daily_pnl"] = _risk_mgr.get_daily_pnl()
+    except Exception:
+        context["daily_pnl"] = 0.0
+
+    try:
+        context["drawdown_pct"] = _risk_mgr.get_risk_metrics().get(
+            "drawdown_pct", 0.0,
+        )
+    except Exception:
+        context["drawdown_pct"] = 0.0
+
+    try:
+        tick = _market_data.get_tick(_config.default_symbol)
+        if tick:
+            context["current_price"] = tick.get("bid", 0.0)
+    except Exception:
+        pass
+
+    return context
+
+
+def _init_automation_engine() -> None:
+    """Create the process's automation engine and start evaluating rules.
+
+    The engine is long-lived and owned here.  The rules it holds are
+    safety nets (emergency stop on drawdown, pause on a volatility
+    spike), which only mean anything if something evaluates them on a
+    schedule — previously nothing did on this path, because each request
+    built a fresh engine, listed the defaults and threw it away.
+    """
+    global _automation_engine
+
+    try:
+        from automation.engine import AutomationEngine
+    except Exception as exc:
+        logger.warning("Automation engine unavailable: %s", exc)
+        return
+
+    engine = AutomationEngine()
+    try:
+        for rule in AutomationEngine.create_default_rules():
+            engine.add_rule(rule)
+    except Exception as exc:
+        logger.warning("Could not load default automation rules: %s", exc)
+
+    _automation_engine = engine
+
+    def _loop() -> None:
+        log = logging.getLogger("automation_loop")
+        log.info(
+            "Automation loop started (%d rules, every %ds).",
+            len(engine.get_rules()), _AUTOMATION_INTERVAL_SEC,
+        )
+        while True:
+            try:
+                executed = engine.evaluate(_automation_context())
+                if executed:
+                    log.warning("Automation rules fired: %s", executed)
+            except Exception as exc:
+                log.debug("Automation evaluation error: %s", exc)
+            time.sleep(_AUTOMATION_INTERVAL_SEC)
+
+    threading.Thread(target=_loop, daemon=True, name="automation").start()
 
 
 def _init_news_engine(config: Config) -> dict | None:

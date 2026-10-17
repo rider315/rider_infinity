@@ -31,6 +31,7 @@ except ImportError:
 import MetaTrader5 as mt5
 
 import trade_manager
+from backtest_core import calc_pnl_pips, check_sl_tp
 from config import Config, TIMEFRAME_MAP, SYMBOL_GROUPS, TIMEFRAME_OPTIONS
 from market_data import MarketDataFeed
 from mt5_connector import MT5Connector
@@ -39,7 +40,7 @@ from risk_manager import RiskManager
 from session_manager import SessionManager
 from strategies import get_strategy, list_strategies
 from strategies.base import SignalAction
-from utils import pips_to_price, price_to_pips, save_trade_to_journal, setup_logger
+from utils import pips_to_price, price_to_pips, save_trade_to_journal, setup_logger, utc_from_timestamp, utc_now
 from bot_history import BotHistoryDB
 from logic_version import compute_logic_version
 
@@ -98,6 +99,13 @@ class BotInstance:
     last_ticket: int = field(default=0)
     active_tickets: list = field(default_factory=list)
     active_positions: list = field(default_factory=list)
+    # Simulated open positions, dry-run only. A dry-run bot places no real
+    # order, so ``active_tickets`` stays empty and the per-bot position
+    # limit never applied — a dry-run bot fired a fresh "trade" on every
+    # candle and its trade count bore no relation to what it would have
+    # done live. These are resolved against the candles by
+    # ``_sync_dry_run_positions``.
+    sim_positions: list = field(default_factory=list)
     # Epoch until which new entries are blocked (set after a losing SL exit).
     cooldown_until: float = field(default=0.0)
     trigger_proximity: dict = field(default_factory=lambda: {
@@ -435,7 +443,7 @@ class MultiBotManager:
             mt5_tf = TIMEFRAME_MAP.get(bot.timeframe_key, 5)
 
             while not bot._stop_event.is_set():
-                now = datetime.utcnow()
+                now = utc_now()
                 bot.last_check = now.strftime("%H:%M:%S")
 
                 # -- Market open check (crypto trades 24/7; forex respects the
@@ -504,7 +512,17 @@ class MultiBotManager:
                     cooldown_reason = trade_manager.cooldown_block_reason(
                         bot.cooldown_until,
                     )
-                    if cooldown_reason:
+                    # Guard: a global pause armed by an automation rule
+                    # (e.g. Emergency Stop) or from the dashboard. Blocks
+                    # new entries only; open positions keep being managed.
+                    gate_reason = trade_manager.GATE.block_reason()
+                    if gate_reason:
+                        bot.blocked_reason = gate_reason
+                        logger.debug(
+                            "Bot#%d signal=%s suppressed: %s",
+                            bot.bot_id, signal.action.value, gate_reason,
+                        )
+                    elif cooldown_reason:
                         bot.blocked_reason = cooldown_reason
                         logger.debug(
                             "Bot#%d signal=%s suppressed: %s",
@@ -512,15 +530,18 @@ class MultiBotManager:
                         )
                     # Guard: per-bot position limit (keeps each bot independent;
                     # the fleet-wide ceiling lives in risk_mgr.can_trade).
-                    elif len(bot.active_tickets) >= per_bot_cap:
+                    # Counts simulated positions too, so a dry-run bot is
+                    # throttled exactly as the live one would be.
+                    elif (open_count := len(bot.active_tickets)
+                          + len(bot.sim_positions)) >= per_bot_cap:
                         bot.blocked_reason = (
                             f"Per-bot limit reached "
-                            f"({len(bot.active_tickets)}/{per_bot_cap} open)"
+                            f"({open_count}/{per_bot_cap} open)"
                         )
                         logger.debug(
                             "Bot#%d signal=%s but at per-bot limit (%d/%d) — skipping.",
                             bot.bot_id, signal.action.value,
-                            len(bot.active_tickets), per_bot_cap,
+                            open_count, per_bot_cap,
                         )
                     else:
                         bot.blocked_reason = ""  # clear on attempt
@@ -530,6 +551,9 @@ class MultiBotManager:
 
                 # -- Sync position state (detect externally closed trades) --
                 self._sync_position_state(bot, logger)
+
+                # -- Dry-run: resolve simulated positions against the candle --
+                self._sync_dry_run_positions(bot, df, logger)
 
                 # -- Breakeven: once a trade is in profit, protect it so it
                 #    can't run back to the full stop (fixes the asymmetric
@@ -686,8 +710,19 @@ class MultiBotManager:
             )
             bot.trades_taken += 1
             self.history_db.increment_trades(bot.bot_id)
+            # Hold the simulated position so the per-bot limit, and the
+            # bot's trade count, behave the way they would live.
+            bot.sim_positions.append({
+                "ticket": -(len(bot.sim_positions) + 1),
+                "type": signal.action.value,
+                "entry": entry,
+                "sl": sl_price,
+                "tp": tp_price,
+                "lot": lot,
+                "open_time": time.time(),
+            })
             save_trade_to_journal({
-                "time": datetime.utcnow().isoformat(),
+                "time": utc_now().isoformat(),
                 "bot_id": bot.bot_id,
                 "symbol": symbol,
                 "action": signal.action.value,
@@ -726,7 +761,7 @@ class MultiBotManager:
                 ticket,
             )
             save_trade_to_journal({
-                "time": datetime.utcnow().isoformat(),
+                "time": utc_now().isoformat(),
                 "bot_id": bot.bot_id,
                 "symbol": symbol,
                 "action": signal.action.value,
@@ -769,6 +804,66 @@ class MultiBotManager:
                 + (f" — {broker_note}" if broker_note and broker_note not in msg else "")
             )
             logger.error("Bot#%d order failed: %s", bot.bot_id, bot.blocked_reason)
+
+    def _sync_dry_run_positions(
+        self, bot: BotInstance, df, logger: logging.Logger,
+    ) -> None:
+        """Resolve a dry-run bot's simulated positions against the candles.
+
+        Dry-run places no real order, so there is no broker to tell us a
+        stop was hit.  Each simulated position is checked against the
+        latest closed candle with the same SL-first rule the backtester
+        uses, and against the configured maximum holding time.
+
+        Without this a dry-run bot would hold its first simulated position
+        forever and, once the per-bot limit counts simulated positions,
+        never trade again.
+        """
+        if not bot.dry_run or not bot.sim_positions:
+            return
+
+        try:
+            bar = df.iloc[-1]
+        except (IndexError, AttributeError):
+            return
+
+        max_hours = float(getattr(self.config, "max_trade_hours", 0) or 0)
+        now = time.time()
+        still_open = []
+
+        for pos in bot.sim_positions:
+            hit = check_sl_tp(
+                {
+                    "direction": pos["type"],
+                    "sl_price": pos["sl"],
+                    "tp_price": pos["tp"],
+                },
+                bar,
+            )
+            if hit is None and max_hours > 0:
+                age_hours = (now - pos.get("open_time", now)) / 3600.0
+                if age_hours >= max_hours:
+                    hit = (float(bar["close"]), "TIME_STOP")
+
+            if hit is None:
+                still_open.append(pos)
+                continue
+
+            exit_price, reason = hit
+            sym_info = self.market_data.get_symbol_info(bot.symbol)
+            point = (sym_info or {}).get("point", 0) or 0
+            pips = (
+                calc_pnl_pips(
+                    pos["type"], pos["entry"], exit_price, bot.symbol, point,
+                )
+                if point > 0 else 0.0
+            )
+            logger.info(
+                "[DRY] Bot#%d simulated exit %s at %.5f (%+.1f pips).",
+                bot.bot_id, reason, exit_price, pips,
+            )
+
+        bot.sim_positions = still_open
 
     def _sole_bot_on_symbol(self, bot: BotInstance) -> bool:
         """Return ``True`` if no other registered bot trades *bot*'s symbol.
@@ -1056,7 +1151,7 @@ class MultiBotManager:
 
             exit_reason = self._DEAL_REASON_MAP.get(reason_code, "UNKNOWN")
             close_time = (
-                datetime.utcfromtimestamp(close_epoch).isoformat()
+                utc_from_timestamp(close_epoch).isoformat()
                 if close_epoch else None
             )
 
@@ -1150,13 +1245,13 @@ class MultiBotManager:
             symbol = ind.symbol
             action = "BUY" if ind.type == 0 else "SELL"  # DEAL_TYPE_BUY == 0
             entry_price = ind.price
-            open_time = datetime.utcfromtimestamp(ind.time).isoformat()
+            open_time = utc_from_timestamp(ind.time).isoformat()
 
             profit = sum(d.profit for d in out_deals)
             swap = sum(getattr(d, "swap", 0.0) for d in dl)
             commission = sum(getattr(d, "commission", 0.0) for d in dl)
             exit_price = out_deals[-1].price
-            close_time = datetime.utcfromtimestamp(
+            close_time = utc_from_timestamp(
                 max(d.time for d in out_deals)
             ).isoformat()
             exit_reason = self._DEAL_REASON_MAP.get(
@@ -1208,7 +1303,7 @@ class MultiBotManager:
             "H1": 3600, "H4": 14400, "D1": 86400, "W1": 604800,
         }
         interval = tf_seconds.get(timeframe_key, 300)
-        now_ts = int(datetime.utcnow().timestamp())
+        now_ts = int(utc_now().timestamp())
         elapsed = now_ts % interval
         return interval - elapsed
 

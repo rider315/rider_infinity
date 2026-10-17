@@ -104,12 +104,53 @@ def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
 # Pip / price helpers
 # =====================================================================
 
+def utc_now() -> datetime:
+    """Return the current UTC time as a **naive** ``datetime``.
+
+    Equivalent to the deprecated ``datetime.utcnow()``, which Python 3.12
+    warns about and will eventually remove.
+
+    Deliberately naive rather than timezone-aware: these timestamps are
+    serialised with ``.isoformat()`` into the trade-history DB, the
+    journal CSV and the saved profiles, and an aware datetime would add a
+    ``+00:00`` suffix.  That would not match the rows already stored, and
+    the string comparisons the performance queries do on those columns
+    would silently stop lining up.  Changing the stored format is a
+    migration, not a deprecation fix — so this keeps the format and gives
+    that migration a single place to happen.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utc_from_timestamp(epoch: float) -> datetime:
+    """Convert *epoch* seconds to a **naive** UTC ``datetime``.
+
+    The non-deprecated equivalent of ``datetime.utcfromtimestamp``.  See
+    :func:`utc_now` for why the result is naive.
+    """
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None)
+
+
 def compute_atr(df, period: int = 14) -> float:
     """Return the latest Average True Range (a *price* value) from OHLC data.
 
-    Uses Wilder's true range = max(high-low, |high-prev_close|, |low-prev_close|)
-    smoothed by a simple moving average over *period* bars.  Returns ``0.0`` if
-    the data is insufficient or the required columns are missing.
+    True range is ``max(high−low, |high−prev_close|, |low−prev_close|)``,
+    smoothed with **Wilder's** exponential method (``alpha = 1/period``) —
+    the standard ATR, and the same smoothing
+    :func:`strategies.indicators.atr` uses.
+
+    Returns ``0.0`` when the data is insufficient, a required column is
+    missing, or the result is NaN, so a caller sizing a stop from this
+    gets a falsy value it can fall back on rather than a NaN that
+    silently propagates into an order.
+
+    .. note::
+       This used to apply a **simple** moving average to the true range
+       while the strategy layer used Wilder's. The live engine sized
+       stops from this function and the strategies gated their entries on
+       the other, so two different ATRs were in play on the same candle —
+       they diverge most exactly when volatility shifts, which is when the
+       stop distance matters.
     """
     try:
         if df is None or len(df) < period + 1:
@@ -122,7 +163,7 @@ def compute_atr(df, period: int = 14) -> float:
         tr = (high - low).abs()
         tr = tr.combine((high - prev_close).abs(), max)
         tr = tr.combine((low - prev_close).abs(), max)
-        atr = tr.rolling(window=period).mean().iloc[-1]
+        atr = tr.ewm(alpha=1.0 / period, adjust=False).mean().iloc[-1]
         return float(atr) if atr == atr else 0.0  # NaN guard
     except Exception:
         return 0.0

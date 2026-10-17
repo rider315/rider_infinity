@@ -40,7 +40,9 @@ The position-level helpers take plain dicts, the shape
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional, Sequence
 
 try:
@@ -53,6 +55,8 @@ from utils import compute_atr, pip_size, pips_to_price, price_to_pips
 
 __all__ = [
     "DEAL_REASON_MAP",
+    "GATE",
+    "TradingGate",
     "apply_breakeven",
     "apply_time_stop",
     "breakeven_decisions",
@@ -90,6 +94,92 @@ DEAL_REASON_MAP: dict[int, str] = {
 _CRYPTO_MIN_SL_PCT = 0.0015   # 0.15% of price
 _CRYPTO_MAX_SL_PCT = 0.015    # 1.5% of price
 _CRYPTO_FALLBACK_SL_PCT = 0.004  # ~0.4% when ATR is unavailable
+
+
+# ---------------------------------------------------------------------
+# Global trading gate
+# ---------------------------------------------------------------------
+
+class TradingGate:
+    """A process-wide switch that blocks new entries.
+
+    The automation engine's ``PauseTradingAction`` needs somewhere real to
+    put "stop opening trades for the next hour".  It used to set
+    ``context["trading_paused"]`` on the dict passed into
+    ``AutomationEngine.evaluate``, but that dict is rebuilt from scratch
+    on every loop iteration and no code ever read the key — so the
+    Emergency Stop rule closed the open positions and then let the bots
+    immediately re-enter.
+
+    This gate is process-global and thread-safe because the thing that
+    sets it (the automation evaluation thread, or a dashboard request)
+    is never the thing that reads it (each bot's trading thread).
+
+    Existing positions are untouched: a pause stops *new* entries, while
+    breakeven, the time-stop and Quick Exit keep managing what is already
+    open.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._until: float = 0.0
+        self._reason: str = ""
+
+    def pause(self, minutes: float, reason: str = "") -> datetime:
+        """Block new entries for *minutes*.  Returns the expiry (UTC).
+
+        Extending an active pause never shortens it: the later of the two
+        expiries wins, so a 15-minute volatility pause cannot cut short a
+        60-minute emergency stop.
+        """
+        expiry_epoch = time.time() + max(0.0, minutes) * 60.0
+        with self._lock:
+            if expiry_epoch > self._until:
+                self._until = expiry_epoch
+                self._reason = reason
+            effective = self._until
+        return datetime.fromtimestamp(effective, tz=timezone.utc)
+
+    def resume(self) -> None:
+        """Clear the pause immediately."""
+        with self._lock:
+            self._until = 0.0
+            self._reason = ""
+
+    def block_reason(self, now: Optional[float] = None) -> Optional[str]:
+        """Return why trading is blocked, or ``None`` if entries are allowed."""
+        now = time.time() if now is None else now
+        with self._lock:
+            if now >= self._until:
+                return None
+            remaining = int(self._until - now)
+            reason = self._reason
+        detail = f"{remaining // 60}m{remaining % 60:02d}s left"
+        return f"Trading paused: {reason} ({detail})" if reason else (
+            f"Trading paused ({detail})"
+        )
+
+    @property
+    def is_paused(self) -> bool:
+        return self.block_reason() is not None
+
+    def to_dict(self) -> dict:
+        """JSON-safe snapshot for the dashboard."""
+        with self._lock:
+            until, reason = self._until, self._reason
+        paused = time.time() < until
+        return {
+            "paused": paused,
+            "reason": reason if paused else "",
+            "until": (
+                datetime.fromtimestamp(until, tz=timezone.utc).isoformat()
+                if paused else None
+            ),
+        }
+
+
+#: The gate every engine consults before opening a position.
+GATE = TradingGate()
 
 
 # ---------------------------------------------------------------------

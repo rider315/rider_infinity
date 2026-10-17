@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +79,10 @@ class TradingProfile:
 
     # Metadata
     created_at: str = field(
-        default_factory=lambda: datetime.utcnow().isoformat()
+        default_factory=lambda: utc_now().isoformat()
     )
     updated_at: str = field(
-        default_factory=lambda: datetime.utcnow().isoformat()
+        default_factory=lambda: utc_now().isoformat()
     )
     is_active: bool = False
 
@@ -111,7 +112,7 @@ class ProfileManager:
 
     def save_profile(self, profile: TradingProfile) -> bool:
         """Persist a profile to disk."""
-        profile.updated_at = datetime.utcnow().isoformat()
+        profile.updated_at = utc_now().isoformat()
         path = self._dir / f"{profile.profile_id}.json"
         try:
             path.write_text(
@@ -347,7 +348,7 @@ class ProfileManager:
             trailing_profile=data.get("trailing_profile"),
             trailing_params=data.get("trailing_params", {}),
             automation_rules=data.get("automation_rules"),
-            created_at=data.get("created_at", datetime.utcnow().isoformat()),
-            updated_at=data.get("updated_at", datetime.utcnow().isoformat()),
+            created_at=data.get("created_at", utc_now().isoformat()),
+            updated_at=data.get("updated_at", utc_now().isoformat()),
             is_active=data.get("is_active", False),
         )

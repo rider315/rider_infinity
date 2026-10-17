@@ -59,6 +59,7 @@ from utils import (
     print_banner,
     save_trade_to_journal,
     setup_logger,
+    utc_now,
 )
 
 
@@ -120,7 +121,9 @@ class RiderInfinityBot:
         self.market_data = MarketDataFeed()
         self.session_mgr = SessionManager()
         self.order_mgr = OrderManager(self.config, dry_run=self.dry_run)
-        self.risk_mgr = RiskManager(self.config, self.connector)
+        self.risk_mgr = RiskManager(
+            self.config, self.connector, session_mgr=self.session_mgr,
+        )
         self.risk_mgr.reset_daily_tracking()
 
         self._show_account_summary()
@@ -622,7 +625,7 @@ class RiderInfinityBot:
         # --- Main loop -----------------------------------------------------
         try:
             while True:
-                now = datetime.utcnow()
+                now = utc_now()
 
                 # -- Market open check (crypto trades 24/7) --
                 if not self.session_mgr.is_market_open(symbol=self.symbol):
@@ -752,15 +755,18 @@ class RiderInfinityBot:
         symbol = signal.symbol or self.symbol
         direction = "BUY" if signal.action == SignalAction.BUY else "SELL"
 
-        # --- Post-loss cooldown ---------------------------------------------
-        # A breakout signal stays valid for several candles, so without this
+        # --- Entry gates ----------------------------------------------------
+        # A global pause armed by an automation rule (e.g. Emergency Stop)
+        # or from the dashboard, then the post-loss cooldown: a breakout
+        # signal stays valid for several candles, so without the cooldown
         # the bot re-enters the move that just stopped it out.
-        cooldown_reason = trade_manager.cooldown_block_reason(
-            self.cooldown_until,
+        block = (
+            trade_manager.GATE.block_reason()
+            or trade_manager.cooldown_block_reason(self.cooldown_until)
         )
-        if cooldown_reason:
-            self.logger.info("Trade suppressed: %s", cooldown_reason)
-            print(f"  {Fore.YELLOW}Trade blocked: {cooldown_reason}{Style.RESET_ALL}")
+        if block:
+            self.logger.info("Trade suppressed: %s", block)
+            print(f"  {Fore.YELLOW}Trade blocked: {block}{Style.RESET_ALL}")
             return
 
         # --- Symbol metadata (needed before stops can be sized) -------------
@@ -839,7 +845,7 @@ class RiderInfinityBot:
             )
             save_trade_to_journal(
                 {
-                    "time": datetime.utcnow().isoformat(),
+                    "time": utc_now().isoformat(),
                     "symbol": symbol,
                     "action": action_str,
                     "lot": lot,
@@ -918,7 +924,7 @@ class RiderInfinityBot:
             "MN1": 2592000,
         }
         interval = tf_seconds.get(timeframe_key, 300)  # default 5 min
-        now_ts = int(datetime.utcnow().timestamp())
+        now_ts = int(utc_now().timestamp())
         elapsed = now_ts % interval
         remaining = interval - elapsed
         return remaining
