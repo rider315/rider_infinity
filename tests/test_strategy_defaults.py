@@ -125,3 +125,71 @@ def test_every_graded_param_is_constructible():
             name: modes["normal"][0] for name, modes in grid.items()
         }
         get_strategy(strategy_name, **params)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# A session strategy must say when its timeframe cannot work
+# ─────────────────────────────────────────────────────────────────────
+
+def _bars_at(freq, n=300):
+    rng = np.random.default_rng(1)
+    close = 1.1000 + np.cumsum(rng.normal(0, 0.0008, n))
+    spread = np.abs(rng.normal(0.0004, 0.0002, n))
+    return pd.DataFrame({
+        "time": pd.date_range("2026-01-01", periods=n, freq=freq, tz="UTC"),
+        "open": close, "high": close + spread,
+        "low": close - spread, "close": close,
+        "volume": rng.integers(50, 500, n),
+    })
+
+
+def test_orb_warns_on_a_daily_timeframe(caplog):
+    """The regression: it held forever and said nothing.
+
+    ORB only signals inside a window opening minutes after a session
+    open. Daily bars are timestamped 00:00, so no window ever matches and
+    every candle returns HOLD — previously with no log at any level, so a
+    D1 bot looked identical to one waiting for a setup.
+    """
+    from strategies.opening_range_strategy import OpeningRangeBreakoutStrategy
+
+    strategy = OpeningRangeBreakoutStrategy()
+    with caplog.at_level("WARNING"):
+        strategy.analyze(_bars_at("1D"), "EURUSD")
+
+    assert any("cannot" in r.message.lower() or "coarse" in r.message.lower()
+               for r in caplog.records), caplog.text
+
+
+def test_orb_warns_only_once(caplog):
+    """Per candle would flood the log — the bot runs this every tick."""
+    from strategies.opening_range_strategy import OpeningRangeBreakoutStrategy
+
+    strategy = OpeningRangeBreakoutStrategy()
+    df = _bars_at("1D")
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            strategy.analyze(df, "EURUSD")
+
+    warnings_logged = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings_logged) == 1
+
+
+def test_orb_is_quiet_on_an_intraday_timeframe(caplog):
+    """The timeframe it is designed for must not warn."""
+    from strategies.opening_range_strategy import OpeningRangeBreakoutStrategy
+
+    strategy = OpeningRangeBreakoutStrategy()
+    with caplog.at_level("WARNING"):
+        strategy.analyze(_bars_at("15min"), "EURUSD")
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_orb_still_returns_hold_not_an_error_on_daily(caplog):
+    """Warning, not raising — a coarse timeframe is a misconfiguration,
+    not a crash, and the bot must keep running."""
+    from strategies.opening_range_strategy import OpeningRangeBreakoutStrategy
+
+    signal = OpeningRangeBreakoutStrategy().analyze(_bars_at("1D"), "EURUSD")
+    assert signal.action.value == "HOLD"
