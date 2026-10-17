@@ -59,6 +59,15 @@ PARAM_GRIDS: dict[str, dict[str, dict[str, list]]] = {
             "normal": [15, 21, 30, 40, 50, 75, 100],
             "deep":   list(range(10, 120, 5)),
         },
+        # The single highest-impact setting on this strategy, and it was
+        # missing: the grid only searched the two periods, so no sweep —
+        # however deep — could discover that the trend filter is what
+        # makes a raw crossover tradeable. See EMACrossoverStrategy.
+        "use_trend_filter": {
+            "quick":  [True],
+            "normal": [True, False],
+            "deep":   [True, False],
+        },
     },
     "rsi": {
         "period": {

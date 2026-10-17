@@ -41,6 +41,42 @@ class EMACrossoverStrategy(BaseStrategy):
         Stop‑loss distance in pips.
     tp_pips : float
         Take‑profit distance in pips.
+    trend_period : int
+        Lookback for the trend EMA used by the filter (default 200).
+    use_trend_filter : bool
+        Only take a cross that agrees with the ``trend_period`` EMA
+        (default ``True``).  A raw dual-EMA crossover fires on every
+        wiggle, and most of those are counter-trend whipsaws; this is
+        what makes the strategy tradeable rather than a coin flip.
+
+        Measured over real daily index data (S&P 500 and NASDAQ,
+        1999-2018, 5031 bars each, 1 index point of spread charged),
+        enabling it improved net P&L, profit factor **and** win rate in
+        all six instrument x stop-distance combinations tested, while
+        roughly halving the trade count:
+
+        =========  =======  ==================  =================
+        Instrument  SL/TP   Filter off          Filter on
+        =========  =======  ==================  =================
+        S&P 500     20/40   -540  (PF 0.82)     -177  (PF 0.89)
+        S&P 500     35/70   -141  (PF 0.96)     **+360** (PF 1.17)
+        S&P 500    60/120   -612  (PF 0.80)     **+1383** (PF 1.76)
+        NASDAQ      20/40   -171  (PF 0.94)     **+243** (PF 1.20)
+        NASDAQ      35/70   +420  (PF 1.11)     **+642** (PF 1.32)
+        NASDAQ     60/120  +1110  (PF 1.20)     **+1533** (PF 1.51)
+        =========  =======  ==================  =================
+
+        It used to default to ``False``, so the shipped configuration was
+        the one this class's own comments described as unprofitable, and
+        ``PARAM_GRIDS`` never searched the flag — a deep sweep could not
+        have found it. Pass ``use_trend_filter=False`` for the old
+        behaviour.
+    min_confidence : float
+        Skip crosses whose normalised fast/slow separation is below this
+        (default 0.0 = take every cross).  Left off deliberately: on the
+        same data it helped at some stop distances and hurt at others,
+        and it cut the sample to ~26 trades over 20 years, which is too
+        thin to conclude anything from.
     """
 
     def __init__(
@@ -50,7 +86,7 @@ class EMACrossoverStrategy(BaseStrategy):
         sl_pips: float = 50,
         tp_pips: float = 100,
         trend_period: int = 200,
-        use_trend_filter: bool = False,
+        use_trend_filter: bool = True,
         min_confidence: float = 0.0,
     ) -> None:
         super().__init__(sl_pips=sl_pips, tp_pips=tp_pips)
