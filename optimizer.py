@@ -28,11 +28,17 @@ from strategies import get_strategy
 from strategies.base import SignalAction
 from utils import pips_to_price, price_to_pips, setup_logger
 from backtester import BacktestDB, BacktestTrade
-from cloud.worker.worker_backtest import (
-    run_single as _backtest_run_single,
-    compute_metrics as _backtest_compute_metrics,
-    check_sl_tp as _backtest_check_sl_tp,
+# The simulation kernel lives in backtest_core (pure, no MT5, no cloud
+# dependency). The sweep previously imported it from cloud.worker, so the
+# local optimiser could not run without the cloud package installed.
+from backtest_core import (
     calc_pnl_pips as _backtest_calc_pnl_pips,
+    check_sl_tp as _backtest_check_sl_tp,
+    pip_value_per_lot as _pip_value_per_lot,
+)
+from cloud.worker.worker_backtest import (
+    compute_metrics as _backtest_compute_metrics,
+    run_single as _backtest_run_single,
 )
 
 logger = setup_logger("optimizer")
@@ -632,9 +638,16 @@ class StrategyOptimizer:
             raise ValueError(f"Cannot get symbol info for {result.symbol}")
         point = sym_info.point
         digits = sym_info.digits
-        pip_value_per_lot = 10.0
-        if "JPY" in result.symbol.upper():
-            pip_value_per_lot = 1000.0 * point * 100
+        # One shared pip definition — this used to special-case JPY with
+        # its own formula, which disagreed with the live engine.
+        pip_value_per_lot = _pip_value_per_lot(
+            result.symbol, point,
+            contract_size=float(
+                getattr(sym_info, "trade_contract_size", 0) or 0
+            ),
+            tick_value=getattr(sym_info, "trade_tick_value", 0) or 0,
+            tick_size=getattr(sym_info, "trade_tick_size", 0) or 0,
+        )
 
         # ── 3. Generate parameter combinations ───────────────────────
         combos = self._generate_combos(

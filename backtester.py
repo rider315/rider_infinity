@@ -15,7 +15,6 @@ Usage (standalone)::
 from __future__ import annotations
 
 import logging
-import math
 import sqlite3
 import threading
 import uuid
@@ -27,6 +26,17 @@ from typing import Any, Optional
 import MetaTrader5 as mt5
 import pandas as pd
 
+from backtest_core import (
+    calc_pnl_pips,
+    check_sl_tp,
+    max_consecutive,
+    equity_curve_from_trades,
+    max_drawdown,
+    pip_size as _pip_size,
+    pip_value_per_lot as _pip_value_per_lot,
+    profit_factor,
+    sharpe_ratio,
+)
 from config import Config, TIMEFRAME_MAP
 from strategies import get_strategy
 from strategies.base import SignalAction
@@ -120,11 +130,9 @@ class BacktestResult:
         self.total_pnl_pips = sum(t.pnl_pips for t in self.trades)
         self.total_pnl_money = sum(t.pnl_money for t in self.trades)
 
-        # Profit factor
-        gross_profit = sum(t.pnl_money for t in self.trades if t.pnl_money > 0)
-        gross_loss = abs(sum(t.pnl_money for t in self.trades if t.pnl_money < 0))
-        self.profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (
-            float("inf") if gross_profit > 0 else 0.0
+        # Profit factor (shared with the sweep and the cloud worker).
+        self.profit_factor = profit_factor(
+            [t.pnl_money for t in self.trades]
         )
 
         # Average win/loss
@@ -138,31 +146,21 @@ class BacktestResult:
         self.best_trade_pips = max(all_pips) if all_pips else 0
         self.worst_trade_pips = min(all_pips) if all_pips else 0
 
-        # Max drawdown from equity curve
+        # Max drawdown. Prefer the recorded equity curve (it includes
+        # open-position marks); fall back to reconstructing it from the
+        # closed trades when no curve was captured.
         if self.equity_curve:
-            peak = self.equity_curve[0]["equity"]
-            max_dd = 0.0
-            max_dd_pct = 0.0
-            for pt in self.equity_curve:
-                eq = pt["equity"]
-                if eq > peak:
-                    peak = eq
-                dd = peak - eq
-                dd_pct = (dd / peak * 100) if peak > 0 else 0
-                if dd > max_dd:
-                    max_dd = dd
-                if dd_pct > max_dd_pct:
-                    max_dd_pct = dd_pct
-            self.max_drawdown = max_dd
-            self.max_drawdown_pct = max_dd_pct
+            equity = [pt["equity"] for pt in self.equity_curve]
+        else:
+            equity = equity_curve_from_trades(
+                [t.pnl_money for t in self.trades], self.initial_balance,
+            )
+        self.max_drawdown, self.max_drawdown_pct = max_drawdown(equity)
 
-        # Sharpe ratio (simplified: using per-trade returns)
-        if len(self.trades) > 1:
-            returns = [t.pnl_money for t in self.trades]
-            avg_ret = sum(returns) / len(returns)
-            variance = sum((r - avg_ret) ** 2 for r in returns) / (len(returns) - 1)
-            std_ret = math.sqrt(variance) if variance > 0 else 0
-            self.sharpe_ratio = (avg_ret / std_ret * math.sqrt(252)) if std_ret > 0 else 0
+        # Sharpe ratio (simplified: per-trade returns annualised).
+        self.sharpe_ratio = sharpe_ratio(
+            [t.pnl_money for t in self.trades]
+        )
 
         # Average trade duration
         durations = []
@@ -203,7 +201,7 @@ class BacktestResult:
             "win_rate": round(self.win_rate, 1),
             "total_pnl_pips": round(self.total_pnl_pips, 1),
             "total_pnl_money": round(self.total_pnl_money, 2),
-            "profit_factor": round(self.profit_factor, 2) if self.profit_factor != float("inf") else 999.99,
+            "profit_factor": round(self.profit_factor, 2),
             "max_drawdown": round(self.max_drawdown, 2),
             "max_drawdown_pct": round(self.max_drawdown_pct, 1),
             "avg_win_pips": round(self.avg_win_pips, 1),
@@ -218,16 +216,11 @@ class BacktestResult:
 
 
 def _max_consecutive(trades: list[BacktestTrade], win: bool) -> int:
-    """Return the maximum consecutive wins or losses."""
-    max_streak = 0
-    current = 0
-    for t in trades:
-        if t.is_win == win:
-            current += 1
-            max_streak = max(max_streak, current)
-        else:
-            current = 0
-    return max_streak
+    """Longest run of winning (or losing) trades.
+
+    Thin wrapper over :func:`backtest_core.max_consecutive`.
+    """
+    return max_consecutive((t.is_win for t in trades), target=win)
 
 
 # =====================================================================
@@ -245,6 +238,10 @@ class BacktestDB:
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, timeout=10)
+        # WAL lets the dashboard read run history while a backtest
+        # thread is still writing, instead of blocking on the writer
+        # (the other two stores in this project already use it).
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
@@ -374,7 +371,7 @@ class BacktestDB:
                 round(result.win_rate, 1),
                 round(result.total_pnl_pips, 1),
                 round(result.total_pnl_money, 2),
-                round(result.profit_factor, 2) if result.profit_factor != float("inf") else 999.99,
+                round(result.profit_factor, 2),
                 round(result.max_drawdown, 2),
                 round(result.max_drawdown_pct, 1),
                 round(result.sharpe_ratio, 2),
@@ -772,32 +769,27 @@ class BacktestEngine:
             raise ValueError(f"Cannot get symbol info for {broker_symbol}")
         point = sym_info.point
         digits = sym_info.digits
-        # ── ONE pip definition, identical to utils.pips_to_price /
-        # price_to_pips (JPY pairs: 100 points, everything else: 10 points).
-        # The old "pip_points = 10 if digits in (3,5) else 1" disagreed with
-        # utils by exactly 10× on 2-digit symbols like gold, which inflated
-        # the spread charge 10× and shrank the $-per-pip 10× — every gold
-        # trade "lost" ~$6.40 regardless of direction (0% win-rate exports).
-        pip_size_price = 100 * point if "JPY" in result.symbol.upper() else 10 * point
-        pip_points = pip_size_price / point if point > 0 else 10.0  # points per pip
+        # ONE pip definition for the whole code-base: instruments.pip_size.
+        # Backtest and live must agree here or a strategy validated on one
+        # trades differently on the other. The previous inline rule read a
+        # JPY pip as 10x too large, and an even older variant disagreed
+        # with it by 10x on gold, which inflated the spread charge 10x and
+        # made every backtested gold trade "lose" ~$6.40 regardless of
+        # direction (the 0% win-rate exports).
+        pip_size_price = _pip_size(result.symbol, point)
+        pip_points = pip_size_price / point if point > 0 else 10.0
 
-        # $ per pip for 1.0 lot.
-        # For USD-quoted symbols (EURUSD, GBPUSD, XAUUSD…) the exact value is
-        # contract_size × pip_size — broker tick data is redundant there, and
-        # some feeds report a bogus trade_tick_value while the market is
-        # closed (MetaQuotes demo gold returns 0.1 instead of 1.0 on
-        # weekends). For cross-quoted symbols (EURJPY…) tick data is the only
-        # way to convert the quote currency, so use it there.
-        contract = float(getattr(sym_info, "trade_contract_size", 0) or 0)
-        if result.symbol.upper().endswith("USD") and contract > 0:
-            pip_value_per_lot = contract * pip_size_price
-        elif sym_info.trade_tick_size and sym_info.trade_tick_size > 0 \
-                and sym_info.trade_tick_value > 0:
-            pip_value_per_lot = (
-                sym_info.trade_tick_value * pip_size_price / sym_info.trade_tick_size
-            )
-        else:
-            pip_value_per_lot = 10.0  # fallback only if broker data missing
+        # $ per pip for 1.0 lot. Prefers contract size for an
+        # account-currency-quoted symbol, because some feeds report a
+        # bogus trade_tick_value while the market is closed.
+        pip_value_per_lot = _pip_value_per_lot(
+            result.symbol, point,
+            contract_size=float(
+                getattr(sym_info, "trade_contract_size", 0) or 0
+            ),
+            tick_value=getattr(sym_info, "trade_tick_value", 0) or 0,
+            tick_size=getattr(sym_info, "trade_tick_size", 0) or 0,
+        )
         if pip_value_per_lot <= 0:
             pip_value_per_lot = 10.0
 
@@ -1020,34 +1012,10 @@ class BacktestEngine:
     ) -> tuple[float, str] | None:
         """Check if a bar triggers SL or TP for a trade.
 
-        Returns ``(exit_price, reason)`` or ``None`` if neither hit.
-        Conservative: if both could hit in the same bar, assume SL first.
+        Delegates to :func:`backtest_core.check_sl_tp` so the in-process
+        engine, the sweep and the cloud worker resolve exits identically.
         """
-        sl = trade["sl_price"]
-        tp = trade["tp_price"]
-        high = bar["high"]
-        low = bar["low"]
-
-        if trade["direction"] == "BUY":
-            sl_hit = low <= sl
-            tp_hit = high >= tp
-            if sl_hit and tp_hit:
-                return (sl, "SL")  # conservative
-            if sl_hit:
-                return (sl, "SL")
-            if tp_hit:
-                return (tp, "TP")
-        else:  # SELL
-            sl_hit = high >= sl
-            tp_hit = low <= tp
-            if sl_hit and tp_hit:
-                return (sl, "SL")  # conservative
-            if sl_hit:
-                return (sl, "SL")
-            if tp_hit:
-                return (tp, "TP")
-
-        return None
+        return check_sl_tp(trade, bar)
 
     @staticmethod
     def _calc_pnl_pips(
@@ -1057,12 +1025,8 @@ class BacktestEngine:
         symbol: str,
         point: float,
     ) -> float:
-        """Calculate P&L in pips."""
-        if direction == "BUY":
-            delta = exit_price - entry_price
-        else:
-            delta = entry_price - exit_price
-        return price_to_pips(delta, symbol, point)
+        """Calculate P&L in pips (see :func:`backtest_core.calc_pnl_pips`)."""
+        return calc_pnl_pips(direction, entry_price, exit_price, symbol, point)
 
 
 # ======================================================================

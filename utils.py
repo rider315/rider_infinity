@@ -19,6 +19,11 @@ from typing import Any, Optional
 
 from colorama import Fore, Style, init as colorama_init
 
+# Pip arithmetic lives in ``instruments`` (dependency-free, so the
+# cloud worker can ship it) and is re-exported here for the many
+# callers that already do ``from utils import pips_to_price``.
+from instruments import pip_size, pips_to_price, price_to_pips  # noqa: F401
+
 # Initialise colorama once for the process (autoreset keeps every
 # print/log statement self-contained).
 colorama_init(autoreset=True)
@@ -99,25 +104,6 @@ def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
 # Pip / price helpers
 # =====================================================================
 
-def pips_to_price(pips: float, symbol: str, point: float) -> float:
-    """Convert a pip value to a price delta for *symbol*.
-
-    Forex convention:
-    * **JPY pairs** – 1 pip = 0.01 = 100 points.
-    * **All others** – 1 pip = 0.0001 = 10 points.
-
-    Args:
-        pips:   Number of pips (e.g. ``50``).
-        symbol: Instrument name, used to detect JPY pairs.
-        point:  The symbol's point size (from ``symbol_info().point``).
-
-    Returns:
-        The equivalent price delta as a float.
-    """
-    pip_size = 100 * point if "JPY" in symbol.upper() else 10 * point
-    return pips * pip_size
-
-
 def compute_atr(df, period: int = 14) -> float:
     """Return the latest Average True Range (a *price* value) from OHLC data.
 
@@ -140,24 +126,6 @@ def compute_atr(df, period: int = 14) -> float:
         return float(atr) if atr == atr else 0.0  # NaN guard
     except Exception:
         return 0.0
-
-
-def price_to_pips(price_delta: float, symbol: str, point: float) -> float:
-    """Convert a price delta to pips for *symbol* (inverse of
-    :func:`pips_to_price`).
-
-    Args:
-        price_delta: Absolute price difference.
-        symbol:      Instrument name, used to detect JPY pairs.
-        point:       The symbol's point size.
-
-    Returns:
-        The equivalent number of pips as a float.
-    """
-    pip_size = 100 * point if "JPY" in symbol.upper() else 10 * point
-    if pip_size == 0:
-        return 0.0
-    return price_delta / pip_size
 
 
 # =====================================================================

@@ -17,10 +17,9 @@ CLI / non-interactive mode::
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 try:
@@ -47,17 +46,16 @@ from session_manager import SessionManager
 
 from risk_manager import RiskManager
 from multi_bot import MultiBotManager, multi_bot_menu
-from strategies import get_strategy, list_strategies, STRATEGY_REGISTRY
+from strategies import get_strategy, list_strategies
 from strategies.base import SignalAction
-from evaluation_matrix import EvaluationMatrix, EvalScore, EvaluatorState, AggregationMode
+import trade_manager
 from trailing_profiles import get_trailing_profile, TrailingState
 from automation.engine import AutomationEngine
-from profile_manager import ProfileManager, TradingProfile
-from event_bus import EventBus, EventChannel, emit_sync
+from profile_manager import ProfileManager
+from event_bus import EventChannel, emit_sync
 from utils import (
     clear_screen,
     format_account_info,
-    pips_to_price,
     print_banner,
     save_trade_to_journal,
     setup_logger,
@@ -98,6 +96,9 @@ class RiderInfinityBot:
         self.profile_mgr: Optional[ProfileManager] = None
         self.trailing_states: dict = {}  # ticket -> TrailingState
         self.trailing_profile_name: str = "atr"  # default trailing profile
+        # Epoch until which new entries are blocked after a losing
+        # stop-out (see trade_manager.cooldown_block_reason).
+        self.cooldown_until: float = 0.0
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -709,7 +710,17 @@ class RiderInfinityBot:
 
                 # -- Act on BUY / SELL signals --
                 if signal.action in (SignalAction.BUY, SignalAction.SELL):
-                    self._execute_signal(signal)
+                    self._execute_signal(signal, df)
+
+                # -- Active trade management (shared with the fleet engine) --
+                # Breakeven stops losers running to the full stop while
+                # winners are banked early; the time-stop cuts positions
+                # that will neither hit SL nor TP; the cooldown blocks
+                # immediate re-entry after a losing stop-out.
+                try:
+                    self._manage_open_positions()
+                except Exception as exc:
+                    self.logger.debug("Trade management error: %s", exc)
 
                 # -- Update trailing stops on open positions --
                 try:
@@ -732,33 +743,27 @@ class RiderInfinityBot:
     # ------------------------------------------------------------------
     # Execute a signal
     # ------------------------------------------------------------------
-    def _execute_signal(self, signal) -> None:
+    def _execute_signal(self, signal, df) -> None:
         """Validate risk, compute prices, and place an order for *signal*."""
         assert self.order_mgr is not None
         assert self.risk_mgr is not None
         assert self.market_data is not None
 
         symbol = signal.symbol or self.symbol
-        sl_pips = signal.sl_pips or self.config.default_sl_pips
-        tp_pips = signal.tp_pips or self.config.default_tp_pips
-
-        # --- Lot size -------------------------------------------------------
-        if self.lot_mode == "auto":
-            lot = self.risk_mgr.calculate_lot_size(symbol, sl_pips)
-        else:
-            lot = self.lot_size
-
-        # --- Risk gate check (enhanced with correlation + recovery) ---------
         direction = "BUY" if signal.action == SignalAction.BUY else "SELL"
-        can, reason = self.risk_mgr.can_trade_enhanced(symbol, lot, direction)
-        if not can:
-            self.logger.info("Trade blocked by risk manager: %s", reason)
-            print(
-                f"  {Fore.YELLOW}Trade blocked: {reason}{Style.RESET_ALL}"
-            )
+
+        # --- Post-loss cooldown ---------------------------------------------
+        # A breakout signal stays valid for several candles, so without this
+        # the bot re-enters the move that just stopped it out.
+        cooldown_reason = trade_manager.cooldown_block_reason(
+            self.cooldown_until,
+        )
+        if cooldown_reason:
+            self.logger.info("Trade suppressed: %s", cooldown_reason)
+            print(f"  {Fore.YELLOW}Trade blocked: {cooldown_reason}{Style.RESET_ALL}")
             return
 
-        # --- SL / TP prices -------------------------------------------------
+        # --- Symbol metadata (needed before stops can be sized) -------------
         tick = self.market_data.get_tick(symbol)
         if tick is None:
             self.logger.warning("Cannot get tick for %s — skipping signal.", symbol)
@@ -773,16 +778,46 @@ class RiderInfinityBot:
         point = sym_info["point"]
         digits = sym_info["digits"]
 
+        # --- Stops: volatility-aware, clamped, with an RR floor -------------
+        # Shared with the fleet engine so both paths size risk identically.
+        sl_pips, tp_pips = trade_manager.resolve_sl_tp(
+            self.config, signal, df, symbol, point,
+        )
+
+        # --- Lot size -------------------------------------------------------
+        if self.lot_mode == "auto":
+            lot = self.risk_mgr.calculate_lot_size(symbol, sl_pips)
+        else:
+            lot = self.lot_size
+
+        # --- Hard per-trade loss cap ----------------------------------------
+        # Shrinks (or rejects) the lot so one trade cannot lose more than
+        # config.max_loss_per_trade_pct of equity.
+        lot, cap_note = self.risk_mgr.cap_lot_for_max_loss(symbol, sl_pips, lot)
+        if lot <= 0:
+            self.logger.info("Trade blocked by loss cap: %s", cap_note)
+            print(f"  {Fore.YELLOW}Trade blocked: {cap_note}{Style.RESET_ALL}")
+            return
+
+        # --- Risk gate check (enhanced with correlation + recovery) ---------
+        can, reason = self.risk_mgr.can_trade_enhanced(symbol, lot, direction)
+        if not can:
+            self.logger.info("Trade blocked by risk manager: %s", reason)
+            print(
+                f"  {Fore.YELLOW}Trade blocked: {reason}{Style.RESET_ALL}"
+            )
+            return
+
+        # --- SL / TP prices -------------------------------------------------
         if signal.action == SignalAction.BUY:
             order_type = mt5.ORDER_TYPE_BUY
             entry = tick["ask"]
-            sl_price = round(entry - pips_to_price(sl_pips, symbol, point), digits)
-            tp_price = round(entry + pips_to_price(tp_pips, symbol, point), digits)
         else:
             order_type = mt5.ORDER_TYPE_SELL
             entry = tick["bid"]
-            sl_price = round(entry + pips_to_price(sl_pips, symbol, point), digits)
-            tp_price = round(entry - pips_to_price(tp_pips, symbol, point), digits)
+        sl_price, tp_price = trade_manager.stop_and_target_prices(
+            direction, entry, sl_pips, tp_pips, symbol, point, digits,
+        )
 
         comment = f"{self.strategy_name}|{signal.reason[:20] if signal.reason else ''}"
 
@@ -891,6 +926,91 @@ class RiderInfinityBot:
     # ===================================================================
     #  TRAILING STOP MANAGEMENT
     # ===================================================================
+    def _manage_open_positions(self) -> None:
+        """Apply the shared trade-management rules to this bot's positions.
+
+        Runs once per loop iteration:
+
+        * **Breakeven** — pulls a winning trade's stop to entry once it is
+          far enough in profit, so a trade that goes green and reverses
+          exits at ≈scratch instead of a full loss.
+        * **Time-stop** — closes positions held past
+          ``config.max_trade_hours``, which will neither hit SL nor TP and
+          only tie up margin.
+        * **Post-loss cooldown** — when a tracked position has closed, a
+          losing stop-out arms a cooldown that blocks re-entry.
+
+        All three live in :mod:`trade_manager` so this path and the fleet
+        engine enforce the same rules.  Skipped in dry-run, where there is
+        no live position to modify.
+        """
+        if self.dry_run or self.order_mgr is None:
+            return
+
+        raw = mt5.positions_get(symbol=self.symbol)
+        if raw is None:
+            raw = ()
+        magic = self.config.magic_number
+        positions = [
+            trade_manager.position_view(p)
+            for p in raw
+            if getattr(p, "magic", 0) == magic
+        ]
+        open_tickets = {p["ticket"] for p in positions}
+
+        # Detect closes among the tickets we were tracking, and arm the
+        # cooldown if one was a losing stop-out.
+        for ticket in list(self.trailing_states):
+            if ticket not in open_tickets:
+                self._note_closed_position(ticket)
+
+        if not positions:
+            return
+
+        trade_manager.apply_breakeven(
+            self.order_mgr, self.config, positions, self.logger,
+        )
+        trade_manager.apply_time_stop(
+            self.order_mgr, self.config, positions, self.logger,
+        )
+
+    def _note_closed_position(self, ticket: int) -> None:
+        """Arm the post-loss cooldown if *ticket* closed as a losing stop-out.
+
+        Sums the closing deals for the position to get its net profit and
+        reads the exit reason from the deal's ``reason`` code, mirroring
+        ``MultiBotManager._record_closed_trade``.
+        """
+        try:
+            deals = mt5.history_deals_get(position=ticket)
+            if not deals:
+                return
+            profit = 0.0
+            reason_code = None
+            for deal in deals:
+                # DEAL_ENTRY_OUT == 1, OUT_BY == 2 (hedged close)
+                if getattr(deal, "entry", 0) in (1, 2):
+                    profit += deal.profit
+                    reason_code = getattr(deal, "reason", None)
+
+            exit_reason = trade_manager.DEAL_REASON_MAP.get(
+                reason_code, "UNKNOWN",
+            )
+            if trade_manager.should_start_cooldown(
+                self.config, exit_reason, profit,
+            ):
+                self.cooldown_until = trade_manager.cooldown_expiry(self.config)
+                self.logger.info(
+                    "Position #%s stopped out at %.2f — entry cooldown for "
+                    "%.0f min.",
+                    ticket, profit,
+                    float(getattr(self.config, "sl_cooldown_min", 0)),
+                )
+        except Exception as exc:
+            self.logger.debug(
+                "Could not read deal history for #%s: %s", ticket, exc,
+            )
+
     def _update_trailing_stops(
         self, profile, current_price: float, df,
     ) -> None:

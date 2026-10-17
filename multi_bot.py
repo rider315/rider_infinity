@@ -30,15 +30,16 @@ except ImportError:
 
 import MetaTrader5 as mt5
 
+import trade_manager
 from config import Config, TIMEFRAME_MAP, SYMBOL_GROUPS, TIMEFRAME_OPTIONS
 from market_data import MarketDataFeed
 from mt5_connector import MT5Connector
 from order_manager import OrderManager
 from risk_manager import RiskManager
-from session_manager import SessionManager, is_crypto
+from session_manager import SessionManager
 from strategies import get_strategy, list_strategies
 from strategies.base import SignalAction
-from utils import compute_atr, pips_to_price, price_to_pips, save_trade_to_journal, setup_logger
+from utils import pips_to_price, price_to_pips, save_trade_to_journal, setup_logger
 from bot_history import BotHistoryDB
 from logic_version import compute_logic_version
 
@@ -499,18 +500,15 @@ class MultiBotManager:
                     # for several candles, so without this the bot re-enters
                     # the same move seconds after being stopped out (the
                     # loss-churn that dominated the losses in the export).
-                    now_ts = time.time()
                     per_bot_cap = getattr(self.config, "max_positions_per_bot", 1)
-                    if now_ts < bot.cooldown_until:
-                        remaining = int(bot.cooldown_until - now_ts)
-                        bot.blocked_reason = (
-                            f"Post-loss cooldown ({remaining // 60}m"
-                            f"{remaining % 60:02d}s left)"
-                        )
+                    cooldown_reason = trade_manager.cooldown_block_reason(
+                        bot.cooldown_until,
+                    )
+                    if cooldown_reason:
+                        bot.blocked_reason = cooldown_reason
                         logger.debug(
-                            "Bot#%d signal=%s suppressed by post-loss cooldown "
-                            "(%ds left).",
-                            bot.bot_id, signal.action.value, remaining,
+                            "Bot#%d signal=%s suppressed: %s",
+                            bot.bot_id, signal.action.value, cooldown_reason,
                         )
                     # Guard: per-bot position limit (keeps each bot independent;
                     # the fleet-wide ceiling lives in risk_mgr.can_trade).
@@ -565,64 +563,15 @@ class MultiBotManager:
         bot.status = BotStatus.STOPPED
 
     def _resolve_sl_tp(self, signal, df, symbol: str, point: float) -> tuple[float, float]:
-        """Return (sl_pips, tp_pips) sized for volatility, clamped, with RR floor.
+        """Return (sl_pips, tp_pips) for this signal.
 
-        * If ``config.use_atr_stops`` is on and ATR is available, the stop is
-          set to ``atr_sl_mult × ATR`` (converted to pips) — so volatile
-          instruments like gold get wider stops and calm pairs get tighter ones.
-        * The stop is clamped to ``[min_sl_pips, max_sl_pips]`` so it can never
-          be absurdly wide (the root cause of the runaway losses).
-        * The take-profit is forced to at least ``min_rr_ratio × sl_pips`` so a
-          high win-rate can't be wrecked by tiny wins vs large losses.
-
-        Crypto (BTC, ETH, …) is special-cased: the forex ``min/max_sl_pips``
-        clamp is meaningless when 1 "pip" is a fraction of a dollar on a
-        $60k instrument (a 60-pip stop would be a few dollars — an instant
-        stop-out / broker "invalid stops" rejection). For crypto the stop is
-        always ATR-driven and clamped to a **percentage-of-price** band so it
-        scales with the instrument.
+        Thin wrapper over :func:`trade_manager.resolve_sl_tp`, which holds
+        the volatility sizing, the pip/percentage clamps and the RR floor
+        so ``bot.py`` enforces exactly the same rules.
         """
-        cfg = self.config
-        rr = getattr(cfg, "min_rr_ratio", 1.8)
-        # Baseline from the strategy's own suggestion (or global defaults).
-        sl_pips = float(signal.sl_pips or cfg.default_sl_pips)
-        tp_pips = float(signal.tp_pips or cfg.default_tp_pips)
-        atr_based = False
-        crypto = is_crypto(symbol)
-
-        # Crypto always uses ATR stops (regardless of the global toggle); forex
-        # only when use_atr_stops is on.
-        if (crypto or getattr(cfg, "use_atr_stops", False)) and point > 0:
-            atr_price = compute_atr(df, getattr(cfg, "atr_period", 14))
-            if atr_price > 0:
-                atr_pips = price_to_pips(atr_price * cfg.atr_sl_mult, symbol, point)
-                if atr_pips > 0:
-                    sl_pips = atr_pips
-                    atr_based = True
-
-        if crypto and point > 0:
-            # Clamp to a fraction-of-price band (0.15%–1.5% of price) so the
-            # stop is neither dust nor absurd. Fall back to ~0.4% of price if
-            # ATR was unavailable.
-            price = float(df["close"].iloc[-1])
-            min_cx = price_to_pips(price * 0.0015, symbol, point)
-            max_cx = price_to_pips(price * 0.015, symbol, point)
-            if not atr_based:
-                sl_pips = price_to_pips(price * 0.004, symbol, point)
-            sl_pips = max(min_cx, min(max_cx, sl_pips))
-            atr_based = True  # always scale TP proportionally for crypto
-        else:
-            # Forex/metals: clamp the stop distance to sane pip bounds.
-            sl_pips = max(cfg.min_sl_pips, min(cfg.max_sl_pips, sl_pips))
-
-        if atr_based:
-            # Volatility-based: scale TP proportionally so it's actually
-            # reachable (a fixed far-away TP is why trades rarely hit profit).
-            tp_pips = sl_pips * rr
-        else:
-            # Fixed-pip fallback: keep the suggested TP but never below the RR floor.
-            tp_pips = max(tp_pips, sl_pips * rr)
-        return round(sl_pips, 1), round(tp_pips, 1)
+        return trade_manager.resolve_sl_tp(
+            self.config, signal, df, symbol, point,
+        )
 
     def _logic_version(self, bot: BotInstance) -> str:
         """Fingerprint of the code + settings shaping this bot's trades.
@@ -681,23 +630,13 @@ class MultiBotManager:
         sl_pips, tp_pips = self._resolve_sl_tp(signal, df, symbol, point)
 
         # Quick-Exit bots bank a few pips per trade — their stop must be in
-        # the same order of magnitude as the target. Without this cap a bot
-        # can pair a 5-pip target with a strategy's 50-pip default stop
-        # (risk 10× reward → needs >90% win-rate; the RSI bots' exact leak).
-        if bot.quick_exit_enabled and bot.quick_exit_pips > 0:
-            cap_mult = float(getattr(self.config, "quick_exit_sl_cap_mult", 0))
-            if cap_mult > 0:
-                cap = max(
-                    bot.quick_exit_pips * cap_mult,
-                    float(getattr(self.config, "min_sl_pips", 8)),
-                )
-                if sl_pips > cap:
-                    logger.info(
-                        "Bot#%d SL capped %.1f → %.1f pips (%.0f× quick-exit "
-                        "target %.1f).",
-                        bot.bot_id, sl_pips, cap, cap_mult, bot.quick_exit_pips,
-                    )
-                    sl_pips = round(cap, 1)
+        # the same order of magnitude as the target.
+        if bot.quick_exit_enabled:
+            sl_pips, cap_note = trade_manager.cap_sl_for_quick_exit(
+                self.config, sl_pips, bot.quick_exit_pips,
+            )
+            if cap_note:
+                logger.info("Bot#%d %s.", bot.bot_id, cap_note)
 
         # Lot size (risk-based when auto, otherwise the bot's fixed lot)
         if bot.lot_mode == "auto":
@@ -724,13 +663,12 @@ class MultiBotManager:
         if signal.action == SignalAction.BUY:
             order_type = mt5.ORDER_TYPE_BUY
             entry = tick["ask"]
-            sl_price = round(entry - pips_to_price(sl_pips, symbol, point), digits)
-            tp_price = round(entry + pips_to_price(tp_pips, symbol, point), digits)
         else:
             order_type = mt5.ORDER_TYPE_SELL
             entry = tick["bid"]
-            sl_price = round(entry + pips_to_price(sl_pips, symbol, point), digits)
-            tp_price = round(entry - pips_to_price(tp_pips, symbol, point), digits)
+        sl_price, tp_price = trade_manager.stop_and_target_prices(
+            signal.action.value, entry, sl_pips, tp_pips, symbol, point, digits,
+        )
 
         # Store last trade levels on the bot for dashboard display
         bot.last_entry = entry
@@ -971,93 +909,30 @@ class MultiBotManager:
             )
 
     def _apply_breakeven(self, bot: BotInstance, logger: logging.Logger) -> None:
-        """Pull a winning trade's stop to breakeven once it's far enough in profit.
+        """Pull winning trades' stops to breakeven.
 
-        This is the single highest-impact fix from the trade-export analysis.
-        The account bled because losers ran to the **full** stop while winners
-        were banked early — so the realised average loss (≈-$13) was far larger
-        than the average win (≈+$8), turning a 55% win-rate into a net loss.
-
-        Logic: for each open position, compute its risk ``R = |entry - SL|``.
-        Once floating profit reaches ``breakeven_trigger_r × R``, move the stop
-        to entry plus a small ``breakeven_lock_pips`` buffer. A trade that first
-        goes green and then reverses now exits at ≈breakeven instead of a full
-        loss, which collapses the avg-loss and flips expectancy positive.
-
-        Skipped in dry-run (no live position to modify) and once the stop is
-        already at/beyond breakeven (so we don't spam ``modify`` requests).
+        Rule lives in :func:`trade_manager.apply_breakeven`; skipped in
+        dry-run because there is no live position to modify.
         """
-        if bot.dry_run or not getattr(self.config, "breakeven_enabled", True):
+        if bot.dry_run or not bot.active_positions:
             return
-        if not bot.active_positions:
-            return
-
-        trigger_r = float(getattr(self.config, "breakeven_trigger_r", 0.6))
-        lock_pips = float(getattr(self.config, "breakeven_lock_pips", 1.0))
-        if trigger_r <= 0:
-            return
-
-        for pos in list(bot.active_positions):
-            entry = pos.get("entry", 0.0)
-            sl = pos.get("sl", 0.0)
-            current = pos.get("price_current", 0.0)
-            ticket = pos.get("ticket")
-            ptype = pos.get("type")
-            if not entry or not current or not ticket or not sl:
-                continue
-
-            risk = abs(entry - sl)
-            if risk <= 0:
-                continue
-
-            # Already locked at/beyond breakeven? Nothing to do.
-            if ptype == "BUY" and sl >= entry:
-                continue
-            if ptype == "SELL" and sl <= entry:
-                continue
-
-            profit_price = (current - entry) if ptype == "BUY" else (entry - current)
-            if profit_price >= trigger_r * risk:
-                ok = self.order_mgr.set_breakeven(ticket, offset_pips=lock_pips)
-                if ok:
-                    logger.info(
-                        "Bot#%d breakeven set for #%s at +%.2fR (lock +%.1f pips).",
-                        bot.bot_id, ticket, profit_price / risk, lock_pips,
-                    )
+        trade_manager.apply_breakeven(
+            self.order_mgr, self.config, list(bot.active_positions),
+            logger, label=f"Bot#{bot.bot_id}",
+        )
 
     def _apply_time_stop(self, bot: BotInstance, logger: logging.Logger) -> None:
         """Force-close positions held longer than ``config.max_trade_hours``.
 
-        The export showed several trades held for days (e.g. a −$76 AUDJPY open
-        for ~6 days, and a −$76 position open ~9,000 minutes). Those are stuck
-        trades that will neither hit SL nor TP and just tie up risk/margin. A
-        hard maximum holding time caps that tail. Disabled when
-        ``max_trade_hours <= 0``; skipped in dry-run.
+        Rule lives in :func:`trade_manager.apply_time_stop`; skipped in
+        dry-run.
         """
-        if bot.dry_run:
+        if bot.dry_run or not bot.active_positions:
             return
-        max_hours = float(getattr(self.config, "max_trade_hours", 0))
-        if max_hours <= 0 or not bot.active_positions:
-            return
-
-        now = time.time()
-        for pos in list(bot.active_positions):
-            opened = pos.get("open_time", 0)
-            ticket = pos.get("ticket")
-            if not opened or not ticket:
-                continue
-            age_hours = (now - opened) / 3600.0
-            if age_hours >= max_hours:
-                logger.info(
-                    "Bot#%d time-stop closing #%s (held %.1fh ≥ %.1fh limit).",
-                    bot.bot_id, ticket, age_hours, max_hours,
-                )
-                ok = self.order_mgr.close_position(ticket)
-                if not ok:
-                    logger.warning(
-                        "Bot#%d time-stop close failed for #%s — will retry.",
-                        bot.bot_id, ticket,
-                    )
+        trade_manager.apply_time_stop(
+            self.order_mgr, self.config, list(bot.active_positions),
+            logger, label=f"Bot#{bot.bot_id}",
+        )
 
     def _apply_quick_exit(self, bot: BotInstance, logger: logging.Logger) -> None:
         """Close any open position the instant it reaches the quick-profit target.
@@ -1146,17 +1021,9 @@ class MultiBotManager:
                     bot.bot_id, ticket,
                 )
 
-    # Map MT5 deal reason codes to human-readable exit reasons.
-    _DEAL_REASON_MAP = {
-        0: "MANUAL",      # DEAL_REASON_CLIENT
-        1: "MANUAL",      # DEAL_REASON_MOBILE
-        2: "MANUAL",      # DEAL_REASON_WEB
-        3: "EXPERT",      # DEAL_REASON_EXPERT
-        4: "SL",          # DEAL_REASON_SL
-        5: "TP",          # DEAL_REASON_TP
-        6: "STOP_OUT",    # DEAL_REASON_SO
-        7: "ROLLOVER",    # DEAL_REASON_ROLLOVER
-    }
+    # Map MT5 deal reason codes to human-readable exit reasons. Shared with
+    # bot.py via trade_manager so both engines classify exits identically.
+    _DEAL_REASON_MAP = trade_manager.DEAL_REASON_MAP
 
     def _record_closed_trade(
         self, bot: "BotInstance", ticket: int, logger: logging.Logger
@@ -1196,16 +1063,14 @@ class MultiBotManager:
             # Post-loss cooldown: a stop-out at a loss blocks re-entry for a
             # while. Winning SL exits (e.g. a trailed Quick-Exit stop) don't
             # trigger it — those are banked winners, not failed entries.
-            cooldown_min = float(getattr(self.config, "sl_cooldown_min", 0))
-            if (
-                cooldown_min > 0
-                and exit_reason in ("SL", "STOP_OUT")
-                and profit < 0
+            if trade_manager.should_start_cooldown(
+                self.config, exit_reason, profit,
             ):
-                bot.cooldown_until = time.time() + cooldown_min * 60.0
+                bot.cooldown_until = trade_manager.cooldown_expiry(self.config)
                 logger.info(
                     "Bot#%d stop-loss at %.2f — entry cooldown for %.0f min.",
-                    bot.bot_id, profit, cooldown_min,
+                    bot.bot_id, profit,
+                    float(getattr(self.config, "sl_cooldown_min", 0)),
                 )
 
             # Pips relative to the stored entry, if we can resolve point size.

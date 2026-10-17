@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 import MetaTrader5 as mt5
 
 from config import Config
-from session_manager import is_crypto
+from instruments import is_crypto, pip_value_per_lot
 
 # File where risk state is persisted across restarts
 _STATE_FILE = Path(__file__).resolve().parent / "data" / "risk_state.json"
@@ -184,36 +184,36 @@ class RiskManager:
         volume_step = sym_info.volume_step
 
         # --- Pip value ------------------------------------------------------
-        # A "pip" is usually 10 points for 5-digit brokers (e.g. EURUSD),
-        # and 1 point for JPY pairs / metals.  We derive the pip value from
-        # the tick value supplied by the broker.
-        if tick_size == 0 or point == 0:
+        if point == 0:
             self.logger.warning(
-                "tick_size or point is 0 for %s — falling back to volume_min.",
-                symbol,
+                "point is 0 for %s — falling back to volume_min.", symbol,
             )
             return volume_min
 
-        # Determine the pip-to-point multiplier
-        digits = sym_info.digits
-        if digits in (3, 5):
-            pip_points = 10  # 5-digit broker: 1 pip = 10 points
-        else:
-            pip_points = 1   # 4-digit / 2-digit
+        # Monetary value of a 1-pip move on 1 standard lot. The pip size
+        # itself comes from instruments.pip_size, the one definition the
+        # whole code-base shares: this function used to apply its own
+        # digits rule while order_manager placed the stop with another, so
+        # a trade was sized for a different risk than it actually carried.
+        pip_val = pip_value_per_lot(
+            symbol, point,
+            contract_size=float(
+                getattr(sym_info, "trade_contract_size", 0) or 0
+            ),
+            tick_value=tick_value,
+            tick_size=tick_size,
+        )
 
-        # Value of 1 pip movement for 1 standard lot
-        pip_value_per_lot = tick_value * (pip_points * point) / tick_size
-
-        if pip_value_per_lot <= 0 or sl_pips <= 0:
+        if pip_val <= 0 or sl_pips <= 0:
             self.logger.warning(
                 "pip_value_per_lot=%.5f  sl_pips=%.1f — using volume_min.",
-                pip_value_per_lot,
+                pip_val,
                 sl_pips,
             )
             return volume_min
 
         # --- Raw lot size ---------------------------------------------------
-        lot_size = risk_amount / (sl_pips * pip_value_per_lot)
+        lot_size = risk_amount / (sl_pips * pip_val)
 
         # --- Round to volume step -------------------------------------------
         if volume_step > 0:
@@ -231,7 +231,7 @@ class RiskManager:
             self.config.max_risk_per_trade,
             risk_amount,
             sl_pips,
-            pip_value_per_lot,
+            pip_val,
             lot_size,
         )
 
@@ -242,13 +242,18 @@ class RiskManager:
         sym_info = mt5.symbol_info(symbol)
         if sym_info is None:
             return 0.0
-        tick_value = sym_info.trade_tick_value
-        tick_size = sym_info.trade_tick_size
         point = sym_info.point
-        if tick_size == 0 or point == 0:
+        if point == 0:
             return 0.0
-        pip_points = 10 if sym_info.digits in (3, 5) else 1
-        return tick_value * (pip_points * point) / tick_size
+        return pip_value_per_lot(
+            symbol, point,
+            contract_size=float(
+                getattr(sym_info, "trade_contract_size", 0) or 0
+            ),
+            tick_value=sym_info.trade_tick_value,
+            tick_size=sym_info.trade_tick_size,
+            fallback=0.0,
+        )
 
     def cap_lot_for_max_loss(
         self, symbol: str, sl_pips: float, lot: float,

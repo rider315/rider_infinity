@@ -19,6 +19,8 @@ import logging
 
 import pandas as pd
 
+from instruments import estimate_pip_size
+
 from .base import BaseStrategy, Signal, SignalAction, TriggerProximity
 
 logger = logging.getLogger(__name__)
@@ -206,8 +208,12 @@ class GridStrategy(BaseStrategy):
 
     @staticmethod
     def _estimate_pip_size(symbol: str) -> float:
-        """Estimate pip size from symbol name."""
-        sym = symbol.upper()
-        if "JPY" in sym:
-            return 0.01
-        return 0.0001
+        """Pip size for the grid's level spacing.
+
+        A strategy never sees ``symbol_info()``, so this is an estimate
+        from the symbol's family — see
+        :func:`instruments.estimate_pip_size`. The previous inline
+        version read gold's pip as 0.0001 instead of 0.1, mis-placing
+        every grid level on metals by a factor of 1000.
+        """
+        return estimate_pip_size(symbol)

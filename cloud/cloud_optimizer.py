@@ -27,6 +27,7 @@ from typing import Any
 import MetaTrader5 as mt5
 import pandas as pd
 
+from backtest_core import pip_value_per_lot as _pip_value_per_lot
 from config import Config, TIMEFRAME_MAP
 from optimizer import PARAM_GRIDS, generate_combos
 
@@ -280,9 +281,17 @@ class CloudOptimizer:
             raise ValueError(f"Cannot get symbol info for {result.symbol}")
         point = sym_info.point
         digits = sym_info.digits
-        pip_value_per_lot = 10.0
-        if "JPY" in result.symbol.upper():
-            pip_value_per_lot = 1000.0 * point * 100
+        # One shared pip definition — this used to special-case JPY with
+        # its own formula, which disagreed with the live engine and with
+        # the local sweep it is meant to mirror.
+        pip_value_per_lot = _pip_value_per_lot(
+            result.symbol, point,
+            contract_size=float(
+                getattr(sym_info, "trade_contract_size", 0) or 0
+            ),
+            tick_value=getattr(sym_info, "trade_tick_value", 0) or 0,
+            tick_size=getattr(sym_info, "trade_tick_size", 0) or 0,
+        )
 
         # ── 3. Generate parameter combos ─────────────────────────────
         combos = generate_combos(

@@ -20,6 +20,7 @@ from collections import defaultdict
 import MetaTrader5 as mt5
 
 from config import Config
+from instruments import pips_to_price
 
 
 # ---------------------------------------------------------------------------
@@ -936,11 +937,11 @@ class OrderManager:
             )
             return False
 
-        point = sym_info.point
-        # Calculate offset in price
-        # For JPY pairs, 1 pip = 100 points; for others, 1 pip = 10 points
-        pip_value = point * 10 if sym_info.digits in (3, 5) else point
-        offset_price = offset_pips * pip_value
+        # One shared pip definition (instruments.pip_size), so the stop
+        # lands at the distance the risk layer sized the lot for.
+        offset_price = pips_to_price(
+            offset_pips, pos.symbol, sym_info.point,
+        )
 
         if pos.type == mt5.ORDER_TYPE_BUY:
             be_sl = round(pos.price_open + offset_price, sym_info.digits)

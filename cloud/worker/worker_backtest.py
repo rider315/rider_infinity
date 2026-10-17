@@ -12,7 +12,6 @@ Used by:
 
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,30 +20,27 @@ import pandas as pd
 
 # When running as a cloud worker the project root is added to sys.path
 # by the bootstrap script. When imported locally the project root is
-# already on the path. Either way, strategies and utils must be importable.
+# already on the path. Either way, ``strategies``, ``backtest_core``
+# and ``instruments`` must be importable.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from backtest_core import (
+    calc_pnl_pips,
+    check_sl_tp,
+    equity_curve_from_trades,
+    max_drawdown,
+    pips_to_price as _pips_to_price,
+    price_to_pips as _price_to_pips,
+    profit_factor,
+    sharpe_ratio,
+)
 from strategies import get_strategy
 from strategies.base import SignalAction
 
 
 # ── pip helpers (inlined to avoid importing utils which may pull MT5) ──
-
-def _pips_to_price(pips: float, symbol: str, point: float) -> float:
-    """Convert pips to price delta."""
-    if "JPY" in symbol.upper():
-        return pips * 0.01
-    return pips * 0.0001
-
-
-def _price_to_pips(price_delta: float, symbol: str, point: float) -> float:
-    """Convert price delta to pips."""
-    if "JPY" in symbol.upper():
-        return price_delta / 0.01
-    return price_delta / 0.0001
-
 
 # ── Lightweight trade record (avoids importing full BacktestTrade) ────
 
@@ -64,41 +60,13 @@ class _Trade:
 #  Core backtest functions (stateless, no MT5)
 # =====================================================================
 
-def check_sl_tp(trade: dict, bar: pd.Series) -> tuple[float, str] | None:
-    """Check if a trade's SL or TP was hit on this bar."""
-    sl, tp = trade["sl_price"], trade["tp_price"]
-    high, low = bar["high"], bar["low"]
-    if trade["direction"] == "BUY":
-        sl_hit = low <= sl
-        tp_hit = high >= tp
-        if sl_hit and tp_hit:
-            return (sl, "SL")
-        if sl_hit:
-            return (sl, "SL")
-        if tp_hit:
-            return (tp, "TP")
-    else:
-        sl_hit = high >= sl
-        tp_hit = low <= tp
-        if sl_hit and tp_hit:
-            return (sl, "SL")
-        if sl_hit:
-            return (sl, "SL")
-        if tp_hit:
-            return (tp, "TP")
-    return None
-
-
-def calc_pnl_pips(direction: str, entry: float, exit_p: float,
-                  symbol: str, point: float) -> float:
-    """Calculate P&L in pips for a closed trade."""
-    delta = (exit_p - entry) if direction == "BUY" else (entry - exit_p)
-    return _price_to_pips(delta, symbol, point)
-
-
 def compute_metrics(trades: list[_Trade], initial_balance: float,
                     final_equity: float) -> dict:
-    """Compute performance metrics from a list of closed trades."""
+    """Compute performance metrics from a list of closed trades.
+
+    The statistics themselves come from :mod:`backtest_core` so the
+    cloud worker reports exactly the figures the in-process engine does.
+    """
     total = len(trades)
     if total == 0:
         return {
@@ -109,54 +77,31 @@ def compute_metrics(trades: list[_Trade], initial_balance: float,
         }
 
     wins = sum(1 for t in trades if t.pnl_pips > 0)
-    losses = total - wins
-    win_rate = wins / total * 100
+    money = [t.pnl_money for t in trades]
 
-    total_pnl_pips = sum(t.pnl_pips for t in trades)
-    total_pnl_money = round(final_equity - initial_balance, 2)
+    win_pips = [t.pnl_pips for t in trades if t.pnl_pips > 0]
+    loss_pips = [t.pnl_pips for t in trades if t.pnl_pips <= 0]
 
-    gross_profit = sum(t.pnl_money for t in trades if t.pnl_money > 0)
-    gross_loss = abs(sum(t.pnl_money for t in trades if t.pnl_money < 0))
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (
-        999.99 if gross_profit > 0 else 0
+    _, max_dd_pct = max_drawdown(
+        equity_curve_from_trades(money, initial_balance)
     )
-
-    w_pips = [t.pnl_pips for t in trades if t.pnl_pips > 0]
-    l_pips = [t.pnl_pips for t in trades if t.pnl_pips <= 0]
-    avg_win = (sum(w_pips) / len(w_pips)) if w_pips else 0
-    avg_loss = (sum(l_pips) / len(l_pips)) if l_pips else 0
-
-    equity = initial_balance
-    peak = equity
-    max_dd_pct = 0.0
-    for t in trades:
-        equity += t.pnl_money
-        if equity > peak:
-            peak = equity
-        dd_pct = ((peak - equity) / peak * 100) if peak > 0 else 0
-        if dd_pct > max_dd_pct:
-            max_dd_pct = dd_pct
-
-    sharpe = 0.0
-    if len(trades) > 1:
-        rets = [t.pnl_money for t in trades]
-        avg_r = sum(rets) / len(rets)
-        var = sum((r - avg_r) ** 2 for r in rets) / (len(rets) - 1)
-        std = math.sqrt(var) if var > 0 else 0
-        sharpe = (avg_r / std * math.sqrt(252)) if std > 0 else 0
 
     return {
         "total_trades": total,
         "wins": wins,
-        "losses": losses,
-        "win_rate": round(win_rate, 1),
-        "total_pnl_pips": round(total_pnl_pips, 1),
-        "total_pnl_money": round(total_pnl_money, 2),
-        "profit_factor": round(min(profit_factor, 999.99), 2),
+        "losses": total - wins,
+        "win_rate": round(wins / total * 100, 1),
+        "total_pnl_pips": round(sum(t.pnl_pips for t in trades), 1),
+        "total_pnl_money": round(final_equity - initial_balance, 2),
+        "profit_factor": round(profit_factor(money), 2),
         "max_drawdown_pct": round(max_dd_pct, 1),
-        "sharpe_ratio": round(sharpe, 2),
-        "avg_win_pips": round(avg_win, 1),
-        "avg_loss_pips": round(avg_loss, 1),
+        "sharpe_ratio": round(sharpe_ratio(money), 2),
+        "avg_win_pips": round(
+            sum(win_pips) / len(win_pips) if win_pips else 0, 1
+        ),
+        "avg_loss_pips": round(
+            sum(loss_pips) / len(loss_pips) if loss_pips else 0, 1
+        ),
     }
 
 

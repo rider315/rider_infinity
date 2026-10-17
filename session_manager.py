@@ -13,26 +13,11 @@ from datetime import datetime, timezone
 logger = logging.getLogger("session_manager")
 
 
-# Crypto bases that trade 24/7 (incl. weekends).  Detection is prefix-based so
-# broker suffixes are tolerated: "BTCUSD", "BTCUSD.", "BTCUSDm", "ETHUSDT" …
-CRYPTO_BASES: tuple[str, ...] = (
-    "BTC", "ETH", "LTC", "XRP", "BCH", "ADA", "DOT", "SOL", "DOGE", "BNB",
-    "LINK", "MATIC", "AVAX", "TRX", "XLM", "ATOM",
-)
-
-
-def is_crypto(symbol: str | None) -> bool:
-    """Return ``True`` when *symbol* is a crypto pair (trades 24/7).
-
-    Matches on the leading base ticker so broker-specific prefixes/suffixes
-    (``BTCUSD``, ``BTCUSD.``, ``BTCUSDm``, ``Bitcoin``…) are tolerated.
-    """
-    if not symbol:
-        return False
-    s = symbol.upper().lstrip("#._-")
-    if s.startswith("BITCOIN") or s.startswith("ETHEREUM"):
-        return True
-    return any(s.startswith(base) for base in CRYPTO_BASES)
+# Crypto detection and the base-ticker lists live in ``instruments``,
+# a dependency-free leaf module, because pip sizing needs them too.
+# Re-exported here so ``from session_manager import is_crypto`` keeps
+# working for the trading engines.
+from instruments import CRYPTO_BASES, is_crypto  # noqa: F401
 
 
 class SessionManager:
